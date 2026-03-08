@@ -114,8 +114,10 @@ _TREE_OPS_SCHEMA: Dict[str, Any] = {
                             "MERGE 的合并内容；SPLIT 时新 category 的摘要：必须由你根据 ids 对应子节点内容做语义浓缩，不得添加子节点没有的信息"
                         },
                         "path_to_move": {
-                            "type": "string",
-                            "description": "MOVE 专用。目标 category 的**完整路径**，如 root.personal.diet_health。"
+                            "type":
+                            "string",
+                            "description":
+                            "MOVE 专用。目标 category 的**完整路径**，如 root.personal.diet_health。"
                             "必须从下方「可用子分类」中精确复制，不能编造或缩写。"
                         },
                     },
@@ -307,13 +309,17 @@ def _build_prompt(
         for n in nodes:
             t = getattr(n, "node_type", None)
             typ = t.value if t else "?"
-            lines.append(f"  [{n.id[:8]}] {typ} path={n.path} | {n.content[:80]}")
+            lines.append(
+                f"  [{n.id[:8]}] {typ} path={n.path} | {n.content[:80]}")
         return "\n".join(lines) + "\n"
 
     # 显式列出可用子分类，供 MOVE 的 path_to_move 精确引用
-    sub_cats = [n for n in (context.children or [])
-                if getattr(n, "node_type", None) == NodeType.CATEGORY]
-    available_cats = "\n".join(f"  - {c.path}" for c in sub_cats) if sub_cats else "  (无)"
+    sub_cats = [
+        n for n in (context.children or [])
+        if getattr(n, "node_type", None) == NodeType.CATEGORY
+    ]
+    available_cats = "\n".join(f"  - {c.path}"
+                               for c in sub_cats) if sub_cats else "  (无)"
     available_block = f"可用子分类（MOVE 时 path_to_move 必须从此精确复制）:\n{available_cats}\n"
 
     hints = []
@@ -331,13 +337,14 @@ def _build_prompt(
         limit_hint = f"\n⚠️ 子分类已满({category_count}/{max_cat})，禁止 SPLIT，只能 MOVE 或 MERGE。\n"
     else:
         limit_hint = "\n"
-    user = (f"目录路径: {context.parent.path}\n"
-            f"目录摘要: {context.parent.content or '(无)'}\n"
-            f"当前：叶子 {leaf_count}/{max_leaf_nodes}，子分类 {category_count}/{max_cat}{limit_hint}\n"
-            f"{available_block}\n" +
-            _fmt_nodes(context.children, "已整理节点（children）") +
-            _fmt_nodes(context.inbox, "待整理碎片（inbox）") +
-            "\n请调用 tree_ops 工具，给出整理方案。ids 可用完整或前 8 位。")
+    user = (
+        f"目录路径: {context.parent.path}\n"
+        f"目录摘要: {context.parent.content or '(无)'}\n"
+        f"当前：叶子 {leaf_count}/{max_leaf_nodes}，子分类 {category_count}/{max_cat}{limit_hint}\n"
+        f"{available_block}\n" +
+        _fmt_nodes(context.children, "已整理节点（children）") +
+        _fmt_nodes(context.inbox, "待整理碎片（inbox）") +
+        "\n请调用 tree_ops 工具，给出整理方案。ids 可用完整或前 8 位。")
     return system, user
 
 
@@ -410,13 +417,15 @@ class LLMStrategy(NodeUpdateStrategy):
     ) -> Optional[NodeUpdateOp]:
 
         total = len(context.pending_nodes) + len(context.active_nodes)
-        all_n = list(context.pending_nodes or []) + list(context.active_nodes or [])
+        all_n = list(context.pending_nodes or []) + list(context.active_nodes
+                                                         or [])
         leaf_count = sum(1 for n in all_n
                          if getattr(n, "node_type", None) == NodeType.LEAF)
-        category_count = sum(1 for n in all_n
-                             if getattr(n, "node_type", None) == NodeType.CATEGORY)
-        within_limits = (leaf_count <= self._max_leaf_nodes and
-                        category_count <= self._max_category_nodes)
+        category_count = sum(
+            1 for n in all_n
+            if getattr(n, "node_type", None) == NodeType.CATEGORY)
+        within_limits = (leaf_count <= self._max_leaf_nodes
+                         and category_count <= self._max_category_nodes)
         if not context.pending_nodes and within_limits:
             return None
 
@@ -425,8 +434,8 @@ class LLMStrategy(NodeUpdateStrategy):
 
         # 有 inbox 或 leaf/category 超限：调用 LLM
 
-        system, user = _build_prompt(
-            context, self._max_leaf_nodes, self._max_category_nodes)
+        system, user = _build_prompt(context, self._max_leaf_nodes,
+                                     self._max_category_nodes)
         try:
             result = await self._adapter.call_with_tools(system, user)
         except Exception as e:

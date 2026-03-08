@@ -27,15 +27,15 @@ def validate_path(path: str) -> str:
 
 @dataclass
 class TreeNode:
-    """path=parent_path.name。name 为路径段：英文语义(work/personal)或 _frag_xxx。"""
 
-    parent_path: str  # 目录路径，root 为 ''
-    name: str  # 路径段，英文语义或 _frag_xxx，用于 path 推导
+    parent_path: str
+    name: str
     node_type: NodeType
     content: str = ""
     tags: list = field(default_factory=list)
     payload: dict = field(default_factory=dict)
-    display_name: Optional[str] = None  # 展示名，与 name 不同时使用（如中文）
+    display_name: Optional[str] = None
+    name_editable: bool = True
     status: NodeStatus = field(default=NodeStatus.ACTIVE)
     is_dirty: bool = False
     version: int = 1
@@ -71,6 +71,7 @@ class TreeNode:
         return len(self.path.split("."))
 
     def touch(self) -> None:
+
         self.access_count += 1
         self.last_accessed_at = _utcnow()
 
@@ -79,12 +80,14 @@ class TreeNode:
         self.updated_at = _utcnow()
 
     def to_dict(self) -> dict:
+
         return {
             "id": self.id,
             "path": self.path,
             "node_type": self.node_type.value,
             "status": self.status.value,
             "name": self.display_name or self.name,
+            "name_editable": self.name_editable,
             "content": self.content,
             "payload": self.payload,
             "tags": self.tags,
@@ -100,13 +103,10 @@ class TreeNode:
 
 
 class VirtualTreeNode(TreeNode):
-    """
-    虚拟节点（记忆碎片）。
-    它是 TreeNode 的一种特殊形态，代表尚未被整理的、暂存的输入流。
-    """
 
     node_type: NodeType = field(default=NodeType.LEAF)
     status: NodeStatus = field(default=NodeStatus.PENDING_REVIEW)
+    name_editable: bool = field(default=False, init=False)  # 虚拟节点名由系统生成，不可改
     retry_count: int = 0
 
     @classmethod

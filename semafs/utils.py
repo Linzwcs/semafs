@@ -13,6 +13,7 @@ def ensure_root(nodes_by_id: Dict[str, TreeNode]) -> None:
         name="root",
         node_type=NodeType.CATEGORY,
         content="",
+        name_editable=False,
     )
     nodes_by_id[root.id] = root
 

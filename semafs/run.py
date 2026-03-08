@@ -274,7 +274,7 @@ async def run_openai_with_export(
 
         from semafs.exporter import MarkdownExporter
 
-        exporter = MarkdownExporter(repo, out, only_active=False)
+        exporter = MarkdownExporter(repo, out, only_active=True)
         count = await exporter.export(root_path="root")
         print(f"\n4️⃣ 导出 Markdown: {count} 个文件 -> {out}")
         print("\n✅ OpenAI 模式 + 导出完成\n")

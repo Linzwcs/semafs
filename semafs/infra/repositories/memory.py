@@ -25,6 +25,9 @@ class MemoryNodeStore(NodeStore):
         return self._nodes.get(node_id)
 
     async def save_raw(self, node: TreeNode) -> None:
+        old = self._nodes.get(node.id)
+        if old and old.path != node.path and self._path_to_id.get(old.path) == node.id:
+            del self._path_to_id[old.path]
         self._nodes[node.id] = node
         if node.status == NodeStatus.ARCHIVED:
             if self._path_to_id.get(node.path) == node.id:
@@ -68,6 +71,30 @@ class MemoryNodeStore(NodeStore):
                 if n.parent_path == prefer_under_parent:
                     return n
         return candidates[0]
+
+    async def cascade_rename_path(
+            self,
+            old_path: str,
+            new_path: str,
+    ) -> int:
+        """级联更新子孙 parent_path，并同步 path_to_id。"""
+        updated = 0
+        prefix = old_path + "."
+        for node in list(self._nodes.values()):
+            if node.status == NodeStatus.ARCHIVED:
+                continue
+            pp = node.parent_path
+            if pp != old_path and not pp.startswith(prefix):
+                continue
+            old_node_path = node.path
+            new_pp = new_path + pp[len(old_path):]
+            node.parent_path = new_pp
+            new_node_path = node.path
+            if old_node_path in self._path_to_id and self._path_to_id[old_node_path] == node.id:
+                del self._path_to_id[old_node_path]
+            self._path_to_id[new_node_path] = node.id
+            updated += 1
+        return updated
 
 
 class MemoryTreeRepository(TreeRepository):
@@ -160,5 +187,5 @@ class MemoryTreeRepository(TreeRepository):
             )
             yield ctx
 
-    async def execute(self, op: NodeUpdateOp) -> None:
-        await self._executor.execute(op, self._store)
+    async def execute(self, op: NodeUpdateOp, context: NodeUpdateContext) -> None:
+        await self._executor.execute(op, self._store, context.parent.path)

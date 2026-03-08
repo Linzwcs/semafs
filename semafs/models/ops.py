@@ -73,24 +73,41 @@ class SplitOp(Op):
         return d
 
 
-AnyOp = Union[MoveOp, MergeOp, SplitOp]
+@dataclass(frozen=True)
+class PersistenceOp(Op):
+
+    name: str
+    content: str
+    payload: dict
+    op_type: OpType = field(default=OpType.PERSISTENCE, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d["name"] = self.name
+        return d
+
+
+AnyOp = Union[MoveOp, MergeOp, SplitOp, PersistenceOp]
 
 
 @dataclass
 class NodeUpdateOp:
+    """
+    维护一个 Category 节点。
+    - ops: 对其子节点的操作（MERGE/SPLIT/MOVE）
+    不暴露 path，执行时由调用方传入 category_path。
+    """
 
     ops: List[AnyOp]
     updated_content: str
-    updated_name: Optional[str] = None  # 父目录的展示名，可选
+    updated_name: Optional[str] = None
     is_macro_change: bool = False
     overall_reasoning: str = ""
 
-    def __post_init__(self) -> None:
-        if not self.ops:
-            raise ValueError("NodeUpdateOp.ops 不能为空")
-
     @property
     def ops_summary(self) -> str:
+        if not self.ops:
+            return "(仅更新 content)"
 
         counts: Dict[str, int] = {}
         for a in self.ops:

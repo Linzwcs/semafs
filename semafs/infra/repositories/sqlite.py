@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS semafs_nodes (
     parent_path    TEXT NOT NULL DEFAULT '',
     name           TEXT NOT NULL DEFAULT '',
     display_name   TEXT,
+    name_editable  INTEGER NOT NULL DEFAULT 1,
     node_type      TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'ACTIVE',
     content        TEXT NOT NULL DEFAULT '',
@@ -45,11 +46,18 @@ def _row_to_node(row: aiosqlite.Row) -> TreeNode:
     payload = json.loads(raw_payload) if isinstance(raw_payload, str) else (raw_payload or {})
     if not payload and NodeType(d["node_type"]) == NodeType.LEAF:
         payload = {"_legacy": True}  # 兼容旧数据或异常写入的空 payload
+    name_editable = d.get("name_editable", 1)
+    if name_editable is None:
+        name_editable = True
+    # root 节点强制不可重命名
+    if d.get("parent_path") == "" and d.get("name") == "root":
+        name_editable = False
     return TreeNode(
         id=d["id"],
         parent_path=d["parent_path"],
         name=d["name"],
         display_name=d.get("display_name"),
+        name_editable=bool(name_editable),
         node_type=NodeType(d["node_type"]),
         status=NodeStatus(d["status"]),
         content=d["content"],
@@ -114,14 +122,14 @@ class SQLiteNodeStore(NodeStore):
             await self._conn.execute(
                 """
                 INSERT INTO semafs_nodes
-                    (id, parent_path, name, display_name, node_type, status, content,
+                    (id, parent_path, name, display_name, name_editable, node_type, status, content,
                      payload, tags, is_dirty, version, access_count, created_at, updated_at, last_accessed_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     parent_path=excluded.parent_path, name=excluded.name, display_name=excluded.display_name,
-                    status=excluded.status, content=excluded.content, payload=excluded.payload,
-                    tags=excluded.tags, is_dirty=excluded.is_dirty, version=excluded.version,
-                    access_count=excluded.access_count, updated_at=excluded.updated_at,
+                    name_editable=excluded.name_editable, status=excluded.status, content=excluded.content,
+                    payload=excluded.payload, tags=excluded.tags, is_dirty=excluded.is_dirty,
+                    version=excluded.version, access_count=excluded.access_count, updated_at=excluded.updated_at,
                     last_accessed_at=excluded.last_accessed_at
                 """,
                 (
@@ -129,6 +137,7 @@ class SQLiteNodeStore(NodeStore):
                     parent_path,
                     name,
                     node.display_name,
+                    int(getattr(node, "name_editable", True)),
                     node.node_type.value,
                     node.status.value,
                     node.content,
@@ -162,14 +171,14 @@ class SQLiteNodeStore(NodeStore):
                 await self._conn.execute(
                     """
                     INSERT INTO semafs_nodes
-                        (id, parent_path, name, display_name, node_type, status, content,
+                        (id, parent_path, name, display_name, name_editable, node_type, status, content,
                          payload, tags, is_dirty, version, access_count, created_at, updated_at, last_accessed_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
                         parent_path=excluded.parent_path, name=excluded.name, display_name=excluded.display_name,
-                        status=excluded.status, content=excluded.content, payload=excluded.payload,
-                        tags=excluded.tags, is_dirty=excluded.is_dirty, version=excluded.version,
-                        access_count=excluded.access_count, updated_at=excluded.updated_at,
+                        name_editable=excluded.name_editable, status=excluded.status, content=excluded.content,
+                        payload=excluded.payload, tags=excluded.tags, is_dirty=excluded.is_dirty,
+                        version=excluded.version, access_count=excluded.access_count, updated_at=excluded.updated_at,
                         last_accessed_at=excluded.last_accessed_at
                     """,
                     (
@@ -177,6 +186,7 @@ class SQLiteNodeStore(NodeStore):
                         parent_path,
                         name,
                         node.display_name,
+                        int(getattr(node, "name_editable", True)),
                         node.node_type.value,
                         node.status.value,
                         node.content,
@@ -247,6 +257,23 @@ class SQLiteNodeStore(NodeStore):
         )).fetchall()
         return [_row_to_node(r) for r in rows]
 
+    async def cascade_rename_path(
+            self,
+            old_path: str,
+            new_path: str,
+    ) -> int:
+        """级联更新子孙 parent_path：old_path.xxx -> new_path.xxx。"""
+        cursor = await self._conn.execute(
+            """
+            UPDATE semafs_nodes
+            SET parent_path = ? || substr(parent_path, length(?) + 1)
+            WHERE (parent_path = ? OR parent_path LIKE ? || '.%')
+            """,
+            (new_path, old_path, old_path, old_path),
+        )
+        await self._conn.commit()
+        return cursor.rowcount
+
 
 class SQLiteTreeRepository(TreeRepository):
     """基于 SQLiteNodeStore 的 TreeRepository 实现。"""
@@ -269,6 +296,14 @@ class SQLiteTreeRepository(TreeRepository):
             await self._conn.execute("DROP TABLE IF EXISTS semafs_nodes")
             await self._conn.execute("DROP INDEX IF EXISTS idx_loc_active")
         await self._conn.executescript(_DDL)
+        # 迁移：若无 name_editable 列则添加
+        cursor = await self._conn.execute(
+            "SELECT name FROM pragma_table_info('semafs_nodes') WHERE name='name_editable'"
+        )
+        if not await cursor.fetchone():
+            await self._conn.execute(
+                "ALTER TABLE semafs_nodes ADD COLUMN name_editable INTEGER NOT NULL DEFAULT 1"
+            )
         await self._conn.commit()
         self._store = SQLiteNodeStore(self._conn)
         await self._ensure_root()
@@ -290,34 +325,10 @@ class SQLiteTreeRepository(TreeRepository):
                 name="root",
                 node_type=NodeType.CATEGORY,
                 content="",
+                name_editable=False,
             )
             await self._store.save_raw(root)
             await self._conn.commit()
-
-    async def ensure_root_available(self) -> None:
-        """导出前恢复：确保 root 为 CATEGORY 且可读。"""
-        # 1) root 必须是 CATEGORY：若存在 root|LEAF|ACTIVE，先归档
-        await self._conn.execute("""UPDATE semafs_nodes SET status='ARCHIVED'
-               WHERE parent_path='' AND name='root' AND node_type='LEAF' AND status!='ARCHIVED'"""
-                                 )
-        # 2) 恢复 root 及其子树：每个 (parent_path, name) 只恢复最新一条
-        await self._conn.execute(
-            """UPDATE semafs_nodes SET status=?
-               WHERE status='ARCHIVED'
-               AND ((parent_path='' AND name='root') OR parent_path='root' OR parent_path LIKE 'root.%')
-               AND NOT EXISTS (
-                 SELECT 1 FROM semafs_nodes n2
-                 WHERE n2.parent_path=semafs_nodes.parent_path AND n2.name=semafs_nodes.name
-                 AND n2.status != 'ARCHIVED'
-               )
-               AND id = (
-                 SELECT id FROM semafs_nodes n2
-                 WHERE n2.parent_path=semafs_nodes.parent_path AND n2.name=semafs_nodes.name
-                 AND n2.status='ARCHIVED' ORDER BY n2.updated_at DESC LIMIT 1
-               )""",
-            (NodeStatus.ACTIVE.value, ),
-        )
-        await self._conn.commit()
 
     async def get_node(self, path: str) -> Optional[TreeNode]:
         return await self._store.get_node(path)
@@ -376,5 +387,5 @@ class SQLiteTreeRepository(TreeRepository):
     async def add_node(self, node: TreeNode) -> str:
         return await apply_add_node(self._store, node)
 
-    async def execute(self, op: NodeUpdateOp) -> None:
-        await self._executor.execute(op, self._store)
+    async def execute(self, op: NodeUpdateOp, context: NodeUpdateContext) -> None:
+        await self._executor.execute(op, self._store, context.parent.path)

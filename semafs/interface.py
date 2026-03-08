@@ -48,14 +48,11 @@ class TreeRepository(Protocol):
         将事务锁与数据快照获取合并，防止并发数据穿透。
         """
 
-    async def execute(self, op: NodeUpdateOp):
+    async def execute(self, op: NodeUpdateOp, context: NodeUpdateContext):
         """
-        核心执行器（重构重点）：
+        核心执行器：对 context.parent 对应的 category 执行 op。
         直接接收 LLM 输出的逻辑意图 (NodeUpdateOp)。
-        底层存储引擎负责将 Merge/Split/Move 翻译为具体的 DB Transaction：
-        - 插入新节点
-        - 将 source_ids 对应的节点标记为 ARCHIVED
-        - 将父节点 is_dirty 设为 False 并 bump_version
+        底层存储引擎负责将 Merge/Split/Move 翻译为具体的 DB Transaction。
         """
 
 

@@ -33,3 +33,14 @@ class NodeStore(Protocol):
             prefer_under_parent: Optional[str] = None) -> Optional[TreeNode]:
         """按展示名 name 查找 CATEGORY。prefer_under_parent 优先同目录下的匹配。"""
         ...
+
+    async def cascade_rename_path(
+            self,
+            old_path: str,
+            new_path: str,
+    ) -> int:
+        """
+        重命名目录后级联更新所有子孙的 parent_path。
+        返回更新的节点数。仅更新 parent_path，不包含被重命名的节点本身。
+        """
+        ...

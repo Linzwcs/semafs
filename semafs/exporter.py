@@ -190,19 +190,23 @@ class TreeTextView:
     async def export(self, root_path: str = "root") -> str:
         """返回树形文本。"""
         self._lines = []
-        if hasattr(self._repo, "ensure_root_available"):
-            await self._repo.ensure_root_available()
         await self._visit(root_path, "", True, is_root=True)
         return "\n".join(self._lines)
 
-    async def _visit(self, path: str, prefix: str, is_last: bool, is_root: bool = False) -> None:
+    async def _visit(self,
+                     path: str,
+                     prefix: str,
+                     is_last: bool,
+                     is_root: bool = False) -> None:
         node = await self._repo.get_node(path)
         if not node or node.status == NodeStatus.ARCHIVED:
             return
         if node.node_type != NodeType.CATEGORY:
             return
 
-        statuses = [NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW, NodeStatus.PROCESSING]
+        statuses = [
+            NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW, NodeStatus.PROCESSING
+        ]
         all_children = await self._repo.list_children(path, statuses=statuses)
         sub_cats = sorted(
             [c for c in all_children if c.node_type == NodeType.CATEGORY],
@@ -216,9 +220,13 @@ class TreeTextView:
             connector = "└── " if is_last else "├── "
             self._lines.append(prefix + connector + name)
 
-        child_prefix = prefix + ("    " if is_last else "│   ") if not is_root else ""
+        child_prefix = prefix + (
+            "    " if is_last else "│   ") if not is_root else ""
         for i, sub in enumerate(sub_cats):
-            await self._visit(sub.path, child_prefix, i == len(sub_cats) - 1, is_root=False)
+            await self._visit(sub.path,
+                              child_prefix,
+                              i == len(sub_cats) - 1,
+                              is_root=False)
 
 
 class TreeStructureExporter:
@@ -227,7 +235,9 @@ class TreeStructureExporter:
     在 output_dir 下创建与 path 对应的目录结构，如 root/work/personal/。
     """
 
-    def __init__(self, repo: TreeRepository, output_dir: str | Path = "tree") -> None:
+    def __init__(self,
+                 repo: TreeRepository,
+                 output_dir: str | Path = "tree") -> None:
         self._repo = repo
         self._out = Path(output_dir)
         self._created = 0
@@ -235,8 +245,6 @@ class TreeStructureExporter:
     async def export(self, root_path: str = "root") -> int:
         """导出从 root_path 开始的目录结构，返回创建的目录数。"""
         self._created = 0
-        if hasattr(self._repo, "ensure_root_available"):
-            await self._repo.ensure_root_available()
         await self._visit(root_path)
         logger.info(f"📁 导出完成：{self._created} 个目录 → {self._out}/")
         return self._created
@@ -248,9 +256,13 @@ class TreeStructureExporter:
         if node.node_type != NodeType.CATEGORY:
             return
 
-        statuses = [NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW, NodeStatus.PROCESSING]
+        statuses = [
+            NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW, NodeStatus.PROCESSING
+        ]
         all_children = await self._repo.list_children(path, statuses=statuses)
-        sub_cats = [c for c in all_children if c.node_type == NodeType.CATEGORY]
+        sub_cats = [
+            c for c in all_children if c.node_type == NodeType.CATEGORY
+        ]
 
         dir_path = self._out / _path_to_dir(path)
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -269,7 +281,7 @@ class MarkdownExporter:
     Args:
         repo:        任意 TreeRepository 实现
         output_dir:  导出目录（默认 "vault"）
-        only_active: True 时跳过 PENDING_REVIEW 碎片
+        only_active: True 时仅导出 ACTIVE 节点（默认 True，避免已归档的 _virtual 等混入）
     """
 
     def __init__(
@@ -277,7 +289,7 @@ class MarkdownExporter:
         repo: TreeRepository,
         output_dir: str | Path = "vault",
         *,
-        only_active: bool = False,
+        only_active: bool = True,
     ) -> None:
         self._repo = repo
         self._out = Path(output_dir)
@@ -288,9 +300,6 @@ class MarkdownExporter:
         """导出从 root_path 开始的完整子树，返回写入文件数。"""
         self._written = 0
         self._out.mkdir(parents=True, exist_ok=True)
-        # 读取层恢复：若 root 被误归档，确保可读（SQLite 会恢复为 ACTIVE）
-        if hasattr(self._repo, "ensure_root_available"):
-            await self._repo.ensure_root_available()
         await self._visit(root_path)
         logger.info(f"📄 导出完成：{self._written} 个文件 → {self._out}/")
         return self._written
@@ -368,9 +377,10 @@ def main() -> None:
     exp.add_argument("--db", default="semafs.db", metavar="PATH")
     exp.add_argument("--out", default="vault", metavar="DIR")
     exp.add_argument("--root", default="root", metavar="PATH")
-    exp.add_argument("--tree", action="store_true",
-                     help="导出文件夹架构（创建目录）")
-    exp.add_argument("--print", dest="print_only", action="store_true",
+    exp.add_argument("--tree", action="store_true", help="导出文件夹架构（创建目录）")
+    exp.add_argument("--print",
+                     dest="print_only",
+                     action="store_true",
                      help="仅输出文本树视图，不创建文件或目录")
     exp.add_argument("--only-active", action="store_true")
     exp.add_argument("-v", "--verbose", action="store_true")

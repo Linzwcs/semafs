@@ -5,7 +5,7 @@ from typing import List, Optional
 from uuid import uuid4
 from ...models.enums import NodeStatus, NodeType, OpType
 from ...models.nodes import TreeNode
-from ...models.ops import MergeOp, MoveOp, NodeUpdateOp, SplitOp
+from ...models.ops import MergeOp, MoveOp, NodeUpdateOp, PersistenceOp, SplitOp
 from ...utils import (
     derive_category_content_from_children,
     path_to_parent_and_segment,
@@ -62,9 +62,29 @@ async def apply_add_node(
 
 class OpExecutor:
 
-    async def execute(self, op: NodeUpdateOp, store: NodeStore) -> None:
+    async def execute(
+        self,
+        op: NodeUpdateOp,
+        store: NodeStore,
+        category_path: str,
+    ) -> None:
+        # ops 为空时仅更新 category 的 content，不归档、不合并
+        if not op.ops:
+            parent = await store.get_node(category_path)
+            if parent:
+                parent.content = op.updated_content
+                if op.updated_name is not None:
+                    parent.display_name = op.updated_name
+                parent.is_dirty = False
+                parent.bump_version()
+                await store.save_raw(parent)
+                logger.debug(
+                    "[Op] 仅更新 category: path=%s content_len=%d",
+                    category_path,
+                    len(op.updated_content),
+                )
+            return
 
-        parent_path: Optional[str] = None
         ids_to_archive: List[str] = []
 
         for sub_op in op.ops:
@@ -76,13 +96,15 @@ class OpExecutor:
                 f"\n[Op Exec] NodeUpdateOp 开始: {op.ops_summary} | reasoning={op.overall_reasoning[:50]}..."
             )
 
-        # ids 仅应包含叶子节点，跳过非叶子
+        # ids 仅应包含叶子节点，跳过非叶子；root 永不归档
         archived = []
         for nid in ids_to_archive:
             node = await store.get_raw(nid)
+            if node and node.path == "root":
+                logger.debug("[Op] 跳过: root 永不归档")
+                continue
             if node and node.node_type == NodeType.LEAF:
-                if parent_path is None:
-                    parent_path = node.parent_path
+                pass  # parent_path 由 category_path 决定，无需从 node 推导
                 node.status = NodeStatus.ARCHIVED
                 archived.append(f"{nid[:8]}:{node.path}")
                 logger.debug(
@@ -114,7 +136,7 @@ class OpExecutor:
                     )
             elif sub_op.op_type == OpType.SPLIT:
                 ok = await self._execute_split(sub_op, op.updated_content,
-                                               store, parent_path)
+                                               store, category_path)
                 if _DEBUG_OPS:
                     print(
                         f"  [Op Exec] SPLIT ids={sub_op.ids} name={getattr(sub_op, 'name', '')} -> ok={ok}"
@@ -125,27 +147,33 @@ class OpExecutor:
                     print(
                         f"  [Op Exec] MOVE ids={sub_op.ids} path_to_move={getattr(sub_op, 'path_to_move', '')} -> new_path={new_path or '(失败)'}"
                     )
-
-        if parent_path:
-            parent = await store.get_node(parent_path)
-            if parent:
-                parent.content = op.updated_content
-                if op.updated_name is not None:
-                    parent.display_name = op.updated_name
-                parent.is_dirty = False
-                parent.bump_version()
-                logger.debug(
-                    "[DB] 更新父目录: path=%s content_len=%d is_dirty=False",
-                    parent.path,
-                    len(op.updated_content),
-                )
-                await store.save_raw(parent)
+            elif sub_op.op_type == OpType.PERSISTENCE:
+                new_path = await self._execute_persistence(
+                    sub_op, store, category_path)
                 if _DEBUG_OPS:
                     print(
-                        f"  [Op Exec] 更新父目录 {parent_path}: content_len={len(op.updated_content)} is_dirty=False"
+                        f"  [Op Exec] PERSISTENCE ids={sub_op.ids} -> new_path={new_path or '(失败)'}"
                     )
-            elif _DEBUG_OPS:
-                print(f"  [Op Exec] 警告: parent_path={parent_path} 不存在，无法更新父目录")
+
+        parent = await store.get_node(category_path)
+        if parent:
+            parent.content = op.updated_content
+            if op.updated_name is not None:
+                parent.display_name = op.updated_name
+            parent.is_dirty = False
+            parent.bump_version()
+            logger.debug(
+                "[DB] 更新 category: path=%s content_len=%d is_dirty=False",
+                parent.path,
+                len(op.updated_content),
+            )
+            await store.save_raw(parent)
+            if _DEBUG_OPS:
+                print(
+                    f"  [Op Exec] 更新 category {category_path}: content_len={len(op.updated_content)} is_dirty=False"
+                )
+        elif _DEBUG_OPS:
+            print(f"  [Op Exec] 警告: category_path={category_path} 不存在，无法更新")
 
     async def _execute_merge(self, merge_op: MergeOp, fallback_content: str,
                              store: NodeStore) -> Optional[str]:
@@ -173,6 +201,40 @@ class OpExecutor:
         await apply_add_node(store, new_node)
         return new_path
 
+    async def _execute_persistence(
+        self,
+        persistence_op: PersistenceOp,
+        store: NodeStore,
+        category_path: str,
+    ) -> Optional[str]:
+        if not persistence_op.ids:
+            return None
+        pdir = category_path
+        raw_name = (persistence_op.name or "").strip()
+        name = sanitize_llm_name(raw_name) if raw_name else None
+        if not name:
+            name = slug_from_uuid(str(uuid4()))
+        new_path = await self._unique_path(store, f"{pdir}.{name}")
+        pp, seg = path_to_parent_and_segment(new_path)
+        payload = dict(
+            persistence_op.payload) if persistence_op.payload else {}
+        payload["_persisted"] = True
+        new_node = TreeNode(
+            parent_path=pp,
+            name=seg,
+            node_type=NodeType.LEAF,
+            content=persistence_op.content or "",
+            payload=payload,
+            status=NodeStatus.ACTIVE,
+        )
+        logger.debug(
+            "[DB] PERSISTENCE 新建: path=%s (原 ids=%s)",
+            new_path,
+            persistence_op.ids,
+        )
+        await apply_add_node(store, new_node)
+        return new_path
+
     async def _execute_split(
         self,
         split_op: SplitOp,
@@ -180,7 +242,7 @@ class OpExecutor:
         store: NodeStore,
         parent_path: Optional[str] = None,
     ) -> bool:
-        """创建子树：父路径由执行上下文 parent_path 决定，完整路径=parent_path.name。
+        """创建子树：父路径由执行上下文（被维护的 category_path）决定，完整路径=parent_path.name。
         SPLIT 至少需要 2 个叶子。"""
         if not split_op.ids or len(split_op.ids) < 2:
             return False

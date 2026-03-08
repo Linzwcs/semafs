@@ -3,7 +3,7 @@ import logging
 import re
 from typing import List, Union
 from .models.nodes import TreeNode, VirtualTreeNode
-from .models.enums import NodeType
+from .models.enums import NodeType, OpType
 from .interface import TreeRepository, NodeUpdateStrategy
 
 logger = logging.getLogger(__name__)
@@ -97,8 +97,8 @@ class SemaFS:
                                      if c.node_type == NodeType.CATEGORY)
 
                 if not ctx.inbox:
-                    if (leaf_count <= self._max_leaf_nodes and
-                            category_count <= self._max_category_nodes):
+                    if (leaf_count <= self._max_leaf_nodes
+                            and category_count <= self._max_category_nodes):
                         node.is_dirty = False
                         await self._repo.add_node(node)
                         continue
@@ -112,7 +112,7 @@ class SemaFS:
                         f"⚠️ 大脑思考失败 {node.path}: {e}, 使用 fallback 策略")
 
                 if node_update_op:
-                    await self._repo.execute(node_update_op)
+                    await self._repo.execute(node_update_op, ctx)
                     summary = node_update_op.ops_summary
                     logger.info(
                         f"✅ [{self.db_name}] 记忆已重组 {node.path}: {summary}")

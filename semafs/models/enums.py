@@ -22,3 +22,4 @@ class OpType(str, Enum):
     MOVE = "MOVE"
     MERGE = "MERGE"
     SPLIT = "SPLIT"
+    PERSISTENCE = "PERSISTENCE"
