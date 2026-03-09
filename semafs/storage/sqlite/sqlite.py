@@ -104,7 +104,31 @@ class SQLiteRepository(NodeRepository):
         return _row_to_node(row) if row else None
 
     def _save_sync(self, node: TreeNode) -> None:
-        """INSERT OR REPLACE（通过 UNIQUE 约束触发 conflict）。"""
+        """先 UPDATE 已存在行（确保 archive 等状态变更持久化），不存在则 INSERT。"""
+        cur = self._conn.execute(
+            "UPDATE semafs_nodes SET "
+            "parent_path=?, name=?, status=?, content=?, display_name=?, "
+            "name_editable=?, payload=?, tags=?, is_dirty=?, version=?, "
+            "access_count=?, updated_at=?, last_accessed_at=? WHERE id=?",
+            (
+                node.parent_path,
+                node.name,
+                node.status.value,
+                node.content,
+                node.display_name,
+                int(node.name_editable),
+                json.dumps(node.payload, ensure_ascii=False),
+                json.dumps(node.tags, ensure_ascii=False),
+                int(node.is_dirty),
+                node.version,
+                node.access_count,
+                node.updated_at.isoformat(),
+                node.last_accessed_at.isoformat(),
+                node.id,
+            ),
+        )
+        if cur.rowcount > 0:
+            return
         self._conn.execute(
             """
             INSERT INTO semafs_nodes
@@ -113,20 +137,6 @@ class SQLiteRepository(NodeRepository):
                  payload, tags, is_dirty, version, access_count,
                  created_at, updated_at, last_accessed_at)
             VALUES (?,?,?,?,?, ?,?,?, ?,?,?,?,?, ?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                parent_path      = excluded.parent_path,
-                name             = excluded.name,
-                status           = excluded.status,
-                content          = excluded.content,
-                display_name     = excluded.display_name,
-                name_editable    = excluded.name_editable,
-                payload          = excluded.payload,
-                tags             = excluded.tags,
-                is_dirty         = excluded.is_dirty,
-                version          = excluded.version,
-                access_count     = excluded.access_count,
-                updated_at       = excluded.updated_at,
-                last_accessed_at = excluded.last_accessed_at
             """,
             (
                 node.id,

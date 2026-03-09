@@ -20,6 +20,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 "parameters": _TREE_OPS_SCHEMA["input_schema"],
             },
         }
+
         resp = await self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -40,6 +41,11 @@ class OpenAIAdapter(BaseLLMAdapter):
                 }
             },
         )
+
+        if not hasattr(resp, "choices") or not resp.choices:
+            hint = "若使用自建 API，请确保 base_url 以 /v1 结尾（如 https://xxx/v1）"
+            raise LLMAdapterError(
+                f"API 返回格式异常（收到 {type(resp).__name__}）: {hint}")
         msg = resp.choices[0].message
         if not msg.tool_calls:
             raise LLMAdapterError("OpenAI 未调用 tree_ops tool")

@@ -1,8 +1,7 @@
 from __future__ import annotations
 from typing import List, Optional, Protocol, runtime_checkable
-from core.enums import NodeStatus
-from core.node import TreeNode
-from core.node import NodePath
+from ..core.enums import NodeStatus
+from ..core.node import TreeNode, NodePath
 
 
 @runtime_checkable

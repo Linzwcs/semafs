@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import AsyncIterator, Protocol, runtime_checkable
-from core.node import TreeNode
+from ..core.node import TreeNode
 from .repo import NodeRepository
 
 
@@ -8,7 +8,6 @@ from .repo import NodeRepository
 class IUnitOfWork(Protocol):
     """工作单元协议。通常作为异步上下文管理器使用。"""
 
-    # 挂载 Repo：用于在推演过程中查询当前状态
     repo: NodeRepository
 
     def register_new(self, node: TreeNode):

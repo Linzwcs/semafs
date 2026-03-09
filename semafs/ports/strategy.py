@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Protocol, runtime_checkable
-from core.ops import RebalancePlan, UpdateContext
+from ..core.ops import RebalancePlan, UpdateContext
 
 
 @runtime_checkable

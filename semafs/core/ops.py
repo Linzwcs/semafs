@@ -37,9 +37,9 @@ class MergeOp:
 
 
 @dataclass(frozen=True)
-class SplitOp:
+class GroupOp:
     """
-    拆分：将 ids 里的叶子移入一个新建的子 CATEGORY。
+    分组：将 ids 里的叶子归入一个新建的子 CATEGORY。
 
     - ids: 至少 2 个叶子节点 ID（构成新子目录的内容）
     - name: 新 CATEGORY 的路径名（LLM 生成）
@@ -49,13 +49,13 @@ class SplitOp:
     name: str
     content: str = ""
     reasoning: str = ""
-    op_type: OpType = field(default=OpType.SPLIT, init=False)
+    op_type: OpType = field(default=OpType.GROUP, init=False)
 
     def __post_init__(self) -> None:
         if len(self.ids) < 2:
-            raise ValueError(f"SplitOp 至少需要 2 个节点 ID，收到 {len(self.ids)} 个")
+            raise ValueError(f"GroupOp 至少需要 2 个节点 ID，收到 {len(self.ids)} 个")
         if not self.name:
-            raise ValueError("SplitOp 必须提供新 CATEGORY 的 name")
+            raise ValueError("GroupOp 必须提供新 CATEGORY 的 name")
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ class PersistOp:
             raise ValueError("PersistOp 一次只处理 1 个节点")
 
 
-AnyOp = Union[MergeOp, SplitOp, MoveOp, PersistOp]
+AnyOp = Union[MergeOp, GroupOp, MoveOp, PersistOp]
 
 
 @dataclass(frozen=True)

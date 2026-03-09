@@ -6,142 +6,161 @@ from ..core.exceptions import LLMAdapterError
 from ..core.enums import NodeType
 
 # ── Tool Schema（Anthropic 格式，OpenAI 适配器会转换）──────────
-
 _TREE_OPS_SCHEMA = {
-    "name":
-    "tree_ops",
-    "description": ("决定如何整理目录中的记忆碎片。返回一组操作（merge/split/move）。"
-                    "如果不需要改变结构，返回 ops=[]。"),
+    "name": "tree_ops",
+    "description": "决定如何整理目录中的记忆碎片。通过执行 merge/group/move 维持目录整洁。",
     "input_schema": {
-        "type": "object",
-        "required": ["ops", "overall_reasoning", "updated_content"],
+        "type":
+        "object",
+        "required":
+        ["ops", "overall_reasoning", "updated_content", "should_dirty_parent"],
         "properties": {
             "ops": {
                 "type": "array",
-                "description": "操作列表，可为空",
+                "description": "操作列表。如果无需改变目录结构（未满载且无需聚类），返回空数组 []",
                 "items": {
                     "type": "object",
-                    "required": ["op_type", "ids", "reasoning"],
+                    "required": ["op_type", "ids", "reasoning", "name"],
                     "properties": {
                         "op_type": {
                             "type": "string",
-                            "enum": ["MERGE", "SPLIT", "MOVE"]
+                            "enum": ["MERGE", "GROUP", "MOVE"]
                         },
                         "ids": {
-                            "type": "array",
+                            "type":
+                            "array",
                             "items": {
                                 "type": "string"
                             },
                             "description":
-                            "MERGE≥2个叶子ID；SPLIT≥2个叶子ID；MOVE恰好1个ID",
+                            "MERGE至少2个LEAF ID；GROUP至少2个LEAF ID；MOVE仅限1个LEAF ID, id来自 [id: xxx] 中的 xxx",
                         },
                         "reasoning": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "简要说明为什么执行此操作（中文）"
                         },
                         "name": {
                             "type":
                             "string",
                             "description":
-                            ("节点名称。格式：仅英文、有语义、简洁、空格用下划线代替。"
-                             "必须根据 ids 对应节点的 content 提炼，不得随意编造。"),
+                            "生成的节点系统名称。必须全小写英文，单词间用下划线连接(如 java_backend_specs)。勿用中文或特殊符号！",
                         },
                         "content": {
                             "type":
                             "string",
                             "description":
-                            "MERGE 的合并内容；SPLIT 新 CATEGORY 的摘要（语义浓缩，不添加原文没有的信息）",
+                            "仅 MERGE 和 GROUP 需要。MERGE: 原文细节的无损拼接或归纳（务必保留数值/专有名词）；GROUP: 新分类的主题概述。",
                         },
                         "path_to_move": {
                             "type":
                             "string",
-                            "description": ("MOVE 专用：目标 CATEGORY 的完整路径，"
-                                            "必须从「可用子分类」列表中精确复制，不能编造。"),
+                            "description":
+                            "仅 MOVE 需要。目标分类的完整路径（必须从 <available_move_targets> 中精确复制）。",
                         },
                     },
                 },
             },
             "overall_reasoning": {
                 "type": "string",
-                "description": "整体决策理由"
+                "description": "描述整体的整理策略和思考过程（中文）"
             },
             "updated_content": {
                 "type": "string",
-                "description": "父目录的新摘要：必须根据子节点内容语义浓缩，不得添加子节点没有的信息",
+                "description": "当前目录在执行完上述 ops 后的全局最新摘要。用于被上级目录读取。",
             },
             "updated_name": {
                 "type": "string",
-                "description": "父目录的新展示名（可选）。格式：仅英文、有语义、简洁、下划线分隔",
+                "description": "当前目录的新展示名（中文，可选）。仅在原名称不再适合当前内容时更新。",
             },
+            "should_dirty_parent": {
+                "type": "boolean",
+                "description": "如果你在此次整理中得出了影响上级目录的重大新结论，设为 true 以触发语义上浮。"
+            }
         },
     },
-}
-_TREE_OPS_SCHEMA["input_schema"]["properties"]["should_dirty_parent"] = {
-    "type":
-    "boolean",
-    "description":
-    "如果当前目录的摘要(updated_content)发生了重大语义变化或信息量激增，请设为 true，以通知父目录更新其描述。"
 }
 # ── Prompt 构建 ────────────────────────────────────────────────
 
 
+def _format_node_list(nodes: list) -> str:
+
+    if not nodes:
+        return "  (空)"
+    lines = []
+    for n in nodes:
+        lines.append(
+            f"  - [id: {n.id[:8]}] node_type: {n.node_type.value} | name: {n.name}(not id) | content: {n.content}..."
+        )
+    return "\n".join(lines)
+
+
 def _build_prompt(
     context: UpdateContext,
-    max_leaf: int,
-    max_cat: int,
+    max_nodes: int,
 ) -> Tuple[str, str]:
-    """构建 system + user prompt，供所有适配器复用。"""
-    all_nodes = context.all_nodes
-    leaf_count = sum(1 for n in all_nodes if n.node_type == NodeType.LEAF)
-    cat_count = sum(1 for n in all_nodes if n.node_type == NodeType.CATEGORY)
-    cat_full = cat_count >= max_cat
 
-    system = ("你是一个知识库整理助手。分析目录中的记忆碎片，"
-              "决定如何合并（MERGE）、拆分（SPLIT）或移动（MOVE）它们。\n"
-              "规则：\n"
-              "1. MERGE：至少 2 个语义高度相似的叶子才合并。content 是语义浓缩，不是简单拼接。\n"
-              "2. SPLIT：叶子数超限且子分类未满时，优先 SPLIT 建立子分类。每组至少 2 个叶子。\n"
-              "3. MOVE：将叶子移入已存在的子分类。path_to_move 必须从「可用子分类」精确复制。\n"
-              "4. 子分类已满时禁止 SPLIT，只能 MOVE 或 MERGE。\n"
-              "5. CATEGORY 节点不参与 MERGE/MOVE/SPLIT。\n"
-              "6. 已经整洁且未超限：ops 返回空列表。\n"
-              "7. name 必须根据 ids 对应的内容提炼，格式：仅英文、有语义、简洁、下划线分隔。\n"
-              "8. updated_content 必须是子节点内容的语义浓缩，不得添加没有的信息。\n"
-              f"9. 每层约束：直接叶子数 ≤ {max_leaf}，子分类数 ≤ {max_cat}。\n"
-              "请用中文填写 reasoning。")
-
-    def _fmt(nodes: list, label: str) -> str:
-        if not nodes:
-            return f"{label}: (空)\n"
-        lines = [f"{label}:"]
-        for n in nodes:
-            t = n.node_type.value if hasattr(n.node_type, "value") else "?"
-            lines.append(f"  [{n.id[:8]}] {t} | {n.content[:80]}")
-        return "\n".join(lines) + "\n"
+    all_nodes = list(context.active_nodes) + list(context.pending_nodes)
+    total_count = len(all_nodes)
 
     sub_cats = [
-        n for n in (context.active_nodes) if n.node_type == NodeType.CATEGORY
+        n for n in context.active_nodes if n.node_type == NodeType.CATEGORY
     ]
-    available = "\n".join(f"  - {c.path}" for c in sub_cats) or "  (无)"
+    available_paths = "\n".join([f"  * {c.path}"
+                                 for c in sub_cats]) or "  (当前无子分类)"
 
-    hints = []
-    if leaf_count > max_leaf:
-        hints.append(f"叶子数 {leaf_count} > {max_leaf}")
-    if cat_count > max_cat:
-        hints.append(f"子分类数 {cat_count} > {max_cat}")
-    limit_hint = f"\n⚠️ {'；'.join(hints)}。" if hints else "\n"
-    if cat_full:
-        limit_hint += f" 子分类已满({cat_count}/{max_cat})，禁止 SPLIT。"
-    limit_hint += "\n" if limit_hint != "\n" else ""
+    # 强化版的 System Prompt
+    system_prompt = f"""你是一个运行在 SemaFS (语义文件系统) 底层的知识图谱调度引擎。
+你的核心职责是：在保证【节点数不超过 {max_nodes} 个】的前提下，对当前的记忆碎片进行语义聚类和信息降维。
 
-    user = (
-        f"目录路径: {context.parent.path}\n"
-        f"目录摘要: {context.parent.content or '(无)'}\n"
-        f"当前：叶子 {leaf_count}/{max_leaf}，子分类 {cat_count}/{max_cat}{limit_hint}\n"
-        f"可用子分类（MOVE 时 path_to_move 必须从此精确复制）:\n{available}\n\n" +
-        _fmt(list(context.active_nodes), "已整理节点") +
-        _fmt(list(context.pending_nodes), "待整理碎片（inbox）") +
-        "\n请调用 tree_ops 工具，给出整理方案。ids 可用完整或前 8 位。")
-    return system, user
+【核心算子 (Ops) 决策指南】
+请严格根据以下场景选择操作：
+1. 🟩 MERGE (合并叶子)：当几个节点描述的是【同一具体事物/习惯的不同侧面】（例："喜欢喝美式"与"喝咖啡不加糖"）。
+   - ⚠️ 致命红线：MERGE 生成的 content 必须是所有原节点细节的「超集」。绝不允许丢失具体数值、时间、专有名词！可以将内容分段拼接，但不能用抽象废话替代具体细节。
+2. 🗂️ GROUP (新建分类)：当几个节点属于【同一个宽泛主题】但互为独立实体（例："前端框架规范"与"后端DB规范"）。
+   - 将它们移入新创建的 CATEGORY 中。新 content 是对该主题的精简摘要。
+3. ➡️ MOVE (移动到现有)：当某个节点完全符合下方列出的「可用子分类」时使用。
+   - ⚠️ 致命红线：path_to_move 必须一字不差地从可用列表中复制，绝不可凭空捏造路径！
+
+【命名与格式红线】
+- `name` 字段：必须作为有效的文件路径节点，尽可能一个单词表示，多个单词用下划线连接。仅限使用小写英文、数字和下划线 (a-z, 0-9, _)，不超过 32 字符。例如: coffee_prefs, morning_routine。绝对禁止中文、大写或空格。
+
+【目录状态刷新】
+- `updated_content`：你必须基于执行操作后的剩余节点和新节点，重新撰写当前目录的完整摘要。
+- `should_dirty_parent`：如果本次整理提取出了全新的重要主题，或者改变了该目录的核心性质，设为 true 以触发级联更新。"""
+
+    status_warning = ""
+    if total_count > max_nodes:
+        status_warning = f"🔴 严重警告：当前总节点数({total_count})已超出硬性上限({max_nodes})，你必须至少执行一次 MERGE 或 GROUP 操作来减少平行节点数量！"
+    elif context.pending_nodes:
+        status_warning = f"🟡 提示：有新碎片进入。如果总数逼近上限，请主动整理以保持目录清爽。"
+
+    # 将内容呈现的结构更加清晰化
+    user_content = f"""<directory_status>
+- current_path: "{context.parent.path}"
+- current_name: "{context.parent.display_name or context.parent.name}"
+- capacity: {total_count}/{max_nodes}
+- alert: {status_warning}
+</directory_status>
+
+<current_directory_summary>
+{context.parent.content or '(空)'}
+</current_directory_summary>
+
+<available_move_targets>
+{available_paths}
+</available_move_targets>
+
+<existing_active_nodes>
+{_format_node_list(list(context.active_nodes))}
+</existing_active_nodes>
+
+<new_pending_fragments>
+{_format_node_list(list(context.pending_nodes))}
+</new_pending_fragments>
+
+请综合以上信息，调用 `tree_ops` 输出你的重构计划。如果当前结构很健康且未超载，可以返回空的 ops 数组，但必须更新 updated_content。"""
+
+    return (system_prompt, user_content)
 
 
 class BaseLLMAdapter(ABC):
@@ -152,9 +171,9 @@ class BaseLLMAdapter(ABC):
         """调用具体 LLM API，返回 tree_ops 的 input dict。"""
         ...
 
-    async def call(self, context: UpdateContext, max_leaf: int,
-                   max_cat: int) -> Dict:
-        system, user = _build_prompt(context, max_leaf, max_cat)
+    async def call(self, context: UpdateContext, max_nodes: int) -> Dict:
+
+        system, user = _build_prompt(context, max_nodes)
         try:
             return await self._call_api(system, user)
         except Exception as e:

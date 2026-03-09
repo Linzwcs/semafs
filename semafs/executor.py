@@ -3,12 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 from uuid import uuid4
-from core.enums import NodeStatus, NodeType
-from core.exceptions import PlanExecutionError
-from core.node import TreeNode
-from core.ops import RebalancePlan, UpdateContext, MergeOp, SplitOp, MoveOp, PersistOp
-from core.node import NodePath
-from ports.uow import UnitOfWork
+from .core.enums import NodeStatus, NodeType
+from .core.exceptions import PlanExecutionError
+from .core.node import TreeNode, NodePath
+from .core.ops import RebalancePlan, UpdateContext, MergeOp, GroupOp, MoveOp, PersistOp
+from .uow import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,6 @@ class Executor:
             context: 执行前快照的上下文（不在执行过程中重新读库）
             uow: 工作单元，用于 register 变更和查询节点
         """
-
         logger.debug(
             "[PlanExecutor] 开始执行计划: %s | parent=%s",
             plan.ops_summary,
@@ -66,17 +64,15 @@ class Executor:
         }
 
         def resolve(node_id: str) -> Optional[TreeNode]:
-            """将 LLM 可能返回的短 ID 解析为完整节点。"""
             return id_index.get(node_id) or short_id_index.get(node_id[:8])
 
-        # 按序执行每个 Op
         for i, op in enumerate(plan.ops):
             try:
                 match op:
                     case MergeOp():
                         await self._do_merge(op, context, uow, resolve)
-                    case SplitOp():
-                        await self._do_split(op, context, uow, resolve)
+                    case GroupOp():
+                        await self._do_group(op, context, uow, resolve)
                     case MoveOp():
                         await self._do_move(op, context, uow, resolve)
                     case PersistOp():
@@ -159,6 +155,7 @@ class Executor:
                 "_merged": True,
                 "_merged_from": [n.id for n in valid_nodes]
             },
+            status=NodeStatus.ACTIVE,
         )
         uow.register_new(new_leaf)
 
@@ -168,15 +165,15 @@ class Executor:
             safe_path,
         )
 
-    async def _do_split(
+    async def _do_group(
         self,
-        op: SplitOp,
+        op: GroupOp,
         context: UpdateContext,
         uow: UnitOfWork,
         resolve,
     ) -> None:
         """
-        SPLIT：创建新子 CATEGORY，将 ids 里的叶子移入其下。
+        GROUP：创建新子 CATEGORY，将 ids 里的叶子归入其下。
 
         注意：原叶子被归档，在新 CATEGORY 下创建内容相同的新叶子。
         新 CATEGORY 的 content 由 LLM 提供（op.content），是语义浓缩。
@@ -184,7 +181,7 @@ class Executor:
         parent_path = context.parent.path
         name = _slug(op.name)
         if not name:
-            logger.warning("[PlanExecutor] SPLIT: name 无效，跳过")
+            logger.warning("[PlanExecutor] GROUP: name 无效，跳过")
             return
 
         cat_path = NodePath(parent_path).child(name)
@@ -194,16 +191,17 @@ class Executor:
             path=safe_cat_path,
             content=op.content,
             display_name=op.name,
+            status=NodeStatus.ACTIVE,
         )
         uow.register_new(new_cat)
 
         moved_count = 0
         for i, nid in enumerate(op.ids):
             node = resolve(nid)
-            if not node or node.node_type != NodeType.LEAF:
-                logger.warning("[PlanExecutor] SPLIT: id=%s 无效或非叶子，跳过", nid)
-                continue
 
+            if not node or node.node_type != NodeType.LEAF:
+                logger.warning("[PlanExecutor] GROUP: id=%s 无效或非叶子，跳过", nid)
+                continue
             node.archive()
             uow.register_dirty(node)
 
@@ -214,15 +212,16 @@ class Executor:
                 path=safe_child,
                 content=node.content,
                 payload={
-                    **node.payload, "_split": True
+                    **node.payload, "_grouped": True
                 },
                 tags=node.tags,
+                status=NodeStatus.ACTIVE,
             )
             uow.register_new(new_leaf)
             moved_count += 1
 
         logger.debug(
-            "[PlanExecutor] SPLIT: 新建 CATEGORY %s，移入 %d 个叶子",
+            "[PlanExecutor] GROUP: 新建 CATEGORY %s，移入 %d 个叶子",
             safe_cat_path,
             moved_count,
         )
@@ -268,6 +267,7 @@ class Executor:
                 **node.payload, "_moved": True
             },
             tags=node.tags,
+            status=NodeStatus.ACTIVE,
         )
         uow.register_new(new_leaf)
 
@@ -295,7 +295,6 @@ class Executor:
 
         parent_path = NodePath(context.parent.path)
         name = _slug(op.name)
-
         preferred = parent_path.child(name)
         safe_path = await uow.nodes.ensure_unique_path(preferred)
         payload = dict(op.payload)

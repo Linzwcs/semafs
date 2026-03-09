@@ -17,5 +17,5 @@ class NodeStatus(str, Enum):
 class OpType(str, Enum):
     MOVE = "MOVE"
     MERGE = "MERGE"
-    SPLIT = "SPLIT"
+    GROUP = "GROUP"  # 原 SPLIT：将 ids 里的叶子归入新建子 CATEGORY
     PERSIST = "PERSIST"

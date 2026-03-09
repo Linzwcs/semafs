@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Optional
-from core.node import NodePath, TreeNode
+from ...core.node import NodePath, TreeNode
 from ...ports.factory import UoWFactory
 from ...uow import UnitOfWork
 from .sqlite import SQLiteRepository, _DDL
