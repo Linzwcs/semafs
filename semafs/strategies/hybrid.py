@@ -6,13 +6,12 @@ from ..core.node import TreeNode
 from ..core.ops import (AnyOp, GroupOp, MergeOp, MoveOp, PersistOp,
                         RebalancePlan, UpdateContext)
 from ..ports.llm import BaseLLMAdapter
-from ..ports.strategy import LLMStrategy
+from ..ports.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_id(raw_id: str, all_nodes: List[TreeNode]) -> Optional[str]:
-    """将短 ID 解析为完整 node.id。"""
     for n in all_nodes:
         if n.id == raw_id or n.id[:8] == raw_id[:8]:
             return n.id
@@ -64,13 +63,13 @@ def _parse_ops(raw_ops: List[Dict], all_nodes: List[TreeNode]) -> List[AnyOp]:
     return ops
 
 
-class HybridLLMStrategy(LLMStrategy):
+class HybridStrategy(Strategy):
     """
-    混合策略：实现 LLMStrategy 端口。
+    混合策略：实现 Strategy 端口。
 
     决策逻辑：
     1. 无 inbox 且在阈值内 → None（无需整理）
-    2. 有 inbox 但总数少（< max_nodes）→ 规则策略（不调 LLM）
+    2. 有 inbox 但总数少（< max_children）→ 规则策略（不调 LLM）
     3. 超阈值或有 inbox 且数量多 → 调 LLM
     4. LLM 失败 → fallback 规则策略
     """
@@ -78,17 +77,17 @@ class HybridLLMStrategy(LLMStrategy):
     def __init__(
         self,
         adapter: BaseLLMAdapter,
-        max_nodes: int = 10,
+        max_children: int = 10,
     ):
         self._adapter = adapter
-        self._max_nodes = max_nodes
+        self._max_children = max_children
 
     async def create_plan(self, context: UpdateContext,
                           max_children: int) -> Optional[RebalancePlan]:
         # Use the argument passed in at call-time if provided, else fall back
         # to the instance default.  This lets SemaFS pass self._max_children
         # through the strategy call without the strategy needing to know about it.
-        effective_max = max_children if max_children is not None else self._max_nodes
+        effective_max = max_children if max_children is not None else self._max_children
 
         total_nodes = len(context.all_nodes)
         force_llm = context.parent.payload.get("_force_llm", False)
@@ -106,7 +105,8 @@ class HybridLLMStrategy(LLMStrategy):
             logger.info("检测到强制 LLM 指令，对 '%s' 进行深度语义重构", context.parent.path)
 
         try:
-            result = await self._adapter.call(context, max_nodes=effective_max)
+            result = await self._adapter.call(context,
+                                              max_children=effective_max)
             raw_ops = result.get("ops", [])
             parsed_ops = _parse_ops(raw_ops, list(context.all_nodes))
 

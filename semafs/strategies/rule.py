@@ -6,31 +6,28 @@
 from __future__ import annotations
 
 from ..core.ops import PersistOp, RebalancePlan, UpdateContext
-from ..ports.strategy import LLMStrategy
+from ..ports.strategy import Strategy
 
 
-class RuleOnlyStrategy(LLMStrategy):
+class RuleOnlyStrategy(Strategy):
     """始终返回规则策略（PersistOp）的整理计划，不调用 LLM。"""
 
-    async def create_plan(
-        self, context: UpdateContext, max_children: int
-    ) -> RebalancePlan:
+    async def create_plan(self, context: UpdateContext,
+                          max_children: int) -> RebalancePlan:
         return self.create_fallback_plan(context, max_children)
 
-    def create_fallback_plan(
-        self, context: UpdateContext, max_children: int
-    ) -> RebalancePlan:
+    def create_fallback_plan(self, context: UpdateContext,
+                             max_children: int) -> RebalancePlan:
         ops = []
         for node in context.pending_nodes:
             ops.append(
                 PersistOp(
-                    ids=(node.id,),
+                    ids=(node.id, ),
                     name=f"leaf_{node.id[:8]}",
                     content=node.content,
                     payload=dict(node.payload),
                     reasoning="规则策略：直接归档碎片",
-                )
-            )
+                ))
         content_parts = [n.content for n in context.pending_nodes if n.content]
         new_append = "\n\n".join(content_parts)
         old_content = context.parent.content or ""

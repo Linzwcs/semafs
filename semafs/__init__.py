@@ -1,4 +1,4 @@
-"""SemaFS: 语义文件系统"""
 from .semafs import SemaFS
 
+__version__ = "0.2.0"
 __all__ = ["SemaFS"]

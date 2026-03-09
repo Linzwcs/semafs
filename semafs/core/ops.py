@@ -142,16 +142,22 @@ class RebalancePlan:
 @dataclass(frozen=True)
 class UpdateContext:
     """
-    整理上下文：PlanExecutor 和 LLMStrategy 所需的全部信息快照。
+    整理上下文：PlanExecutor 和 Strategy 所需的全部信息快照。
 
     这是一个只读的数据快照，在事务开始时一次性获取，
     后续操作基于此快照推演，避免在执行中途读库产生的不一致。
+
+    新增上下文信息：
+    - sibling_categories: parent 的同级 CATEGORY 节点，用于避免重命名冲突
+    - ancestor_categories: 从 parent 到 root 的祖先 CATEGORY 链，提供层级语义理解
     """
     from .node import TreeNode  # 避免循环导入，延迟引入
 
     parent: "TreeNode"
     active_nodes: Tuple["TreeNode", ...]  # 已整理的稳定节点
     pending_nodes: Tuple["TreeNode", ...]  # 刚写入的碎片（PENDING_REVIEW）
+    sibling_categories: Tuple["TreeNode", ...] = ()  # parent 同级 CATEGORY（不含自身）
+    ancestor_categories: Tuple["TreeNode", ...] = ()  # 祖先 CATEGORY 链（从近到远）
 
     @property
     def inbox(self) -> Tuple["TreeNode", ...]:
@@ -166,3 +172,14 @@ class UpdateContext:
     @property
     def all_nodes(self) -> Tuple["TreeNode", ...]:
         return self.active_nodes + self.pending_nodes
+
+    @property
+    def sibling_category_names(self) -> Tuple[str, ...]:
+        """同级分类名称集合，用于快速检查命名冲突。"""
+        return tuple(s.name for s in self.sibling_categories)
+
+    @property
+    def ancestor_path_chain(self) -> Tuple[str, ...]:
+        """从 root 到 parent 的完整路径链（从远到近）。"""
+        return tuple(reversed([a.path for a in self.ancestor_categories
+                               ])) + (self.parent.path, )

@@ -225,6 +225,39 @@ class SQLiteRepository(NodeRepository):
             (new_path, len(old_path) + 1, old_path, old_path + ".%"),
         )
 
+    def _list_sibling_categories_sync(self, path: str) -> List[TreeNode]:
+        """获取与指定节点同级的所有 CATEGORY 节点（不包括指定节点自身）。"""
+        np = NodePath(path)
+        if np.is_root:
+            return []  # root 没有兄弟节点
+        cur = self._conn.execute(
+            "SELECT * FROM semafs_nodes "
+            "WHERE parent_path=? AND node_type='CATEGORY' AND status='ACTIVE' AND name!=?",
+            (np.parent_path_str, np.name),
+        )
+        cur.row_factory = sqlite3.Row
+        return [_row_to_node(r) for r in cur.fetchall()]
+
+    def _get_ancestor_categories_sync(
+        self, path: str, max_depth: Optional[int] = None
+    ) -> List[TreeNode]:
+        """获取从指定节点到 root 的祖先 CATEGORY 链（从近到远）。"""
+        ancestors = []
+        current = NodePath(path)
+        depth = 0
+
+        while not current.is_root:
+            current = current.parent
+            if max_depth is not None and depth >= max_depth:
+                break
+
+            node = self._get_by_path_sync(str(current))
+            if node and node.node_type == NodeType.CATEGORY:
+                ancestors.append(node)
+            depth += 1
+
+        return ancestors
+
     def _commit_sync(self) -> None:
         self._conn.commit()
 
@@ -270,3 +303,13 @@ class SQLiteRepository(NodeRepository):
     async def ensure_unique_path(self, preferred: NodePath) -> NodePath:
         return await asyncio.to_thread(self._ensure_unique_path_sync,
                                        preferred)
+
+    async def list_sibling_categories(self, path: str) -> List[TreeNode]:
+        return await asyncio.to_thread(self._list_sibling_categories_sync,
+                                       path)
+
+    async def get_ancestor_categories(
+        self, path: str, max_depth: Optional[int] = None
+    ) -> List[TreeNode]:
+        return await asyncio.to_thread(self._get_ancestor_categories_sync,
+                                       path, max_depth)

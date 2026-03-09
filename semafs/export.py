@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 将 SemaFS 数据库导出为 Markdown 视图。
 
@@ -21,13 +20,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
-
-# 确保项目根在 path 中
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
+from typing import List
 from semafs.core.enums import NodeStatus, NodeType
 from semafs.core.node import TreeNode
 from semafs.storage.sqlite.factory import SQLiteUoWFactory
@@ -118,8 +111,8 @@ def _render_category(
     sub_categories: List[TreeNode],
 ) -> str:
     label = node.display_name or node.name or node.path.rsplit(".", 1)[-1]
-    depth = node.path.count(".") + 1  # root=1, root.work=2, …
-    heading = "#" * min(depth, 3)  # h1–h3
+    depth = node.path.count(".") + 1
+    heading = "#" * min(depth, 3)
 
     cat_meta = _node_meta_block(
         node_type="CATEGORY",
@@ -159,13 +152,13 @@ def _render_category(
     if active:
         lines += ["## 内容 (LEAF)", ""]
         for i, leaf in enumerate(
-            sorted(active, key=lambda x: x.updated_at, reverse=True), 1
-        ):
+                sorted(active, key=lambda x: x.updated_at, reverse=True), 1):
             lines.append(_leaf_section(leaf, i))
 
     if pending:
         lines += ["## ⏳ 待整理 (LEAF)", ""]
-        for i, leaf in enumerate(sorted(pending, key=lambda x: x.created_at), 1):
+        for i, leaf in enumerate(sorted(pending, key=lambda x: x.created_at),
+                                 1):
             lines.append(_leaf_section(leaf, i))
 
     lines += ["---", "", f"<sub>导出于 {_NOW()}</sub>", ""]
@@ -243,9 +236,8 @@ class TreeTextView:
             connector = "└── " if is_last else "├── "
             self._lines.append(prefix + connector + name)
 
-        child_prefix = (
-            prefix + ("    " if is_last else "│   ") if not is_root else ""
-        )
+        child_prefix = (prefix +
+                        ("    " if is_last else "│   ") if not is_root else "")
         for i, sub in enumerate(sub_cats):
             await self._visit(
                 sub.path,
@@ -286,7 +278,9 @@ class TreeStructureExporter:
             NodeStatus.PROCESSING,
         ]
         all_children = await self._repo.list_children(path, statuses=statuses)
-        sub_cats = [c for c in all_children if c.node_type == NodeType.CATEGORY]
+        sub_cats = [
+            c for c in all_children if c.node_type == NodeType.CATEGORY
+        ]
 
         dir_path = self._out / _path_to_dir(path)
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -339,7 +333,9 @@ class MarkdownExporter:
         all_children = await self._repo.list_children(path, statuses=statuses)
 
         leaves = [c for c in all_children if c.node_type == NodeType.LEAF]
-        sub_cats = [c for c in all_children if c.node_type == NodeType.CATEGORY]
+        sub_cats = [
+            c for c in all_children if c.node_type == NodeType.CATEGORY
+        ]
 
         out_path = self._out / _category_filename(path)
         try:
@@ -357,22 +353,24 @@ class MarkdownExporter:
 
 # --- 单文件导出（兼容原有 export_to_markdown）---
 
+
 def _heading(level: int) -> str:
     return "#" * min(level + 1, 6)
 
 
 async def _export_tree_single(
-    repo,
-    path: str,
-    lines: list[str],
-    depth: int = 0,
-    statuses: tuple[NodeStatus, ...] = (NodeStatus.ACTIVE,),
+        repo,
+        path: str,
+        lines: list[str],
+        depth: int = 0,
+        statuses: tuple[NodeStatus, ...] = (NodeStatus.ACTIVE, ),
 ) -> None:
     """递归遍历目录树，生成单文件 Markdown。"""
     children = await repo.list_children(path, statuses=list(statuses))
 
     def _key(n):
-        return (0 if n.node_type == NodeType.CATEGORY else 1, n.display_name or n.name)
+        return (0 if n.node_type == NodeType.CATEGORY else 1, n.display_name
+                or n.name)
 
     children = sorted(children, key=_key)
 
@@ -387,7 +385,8 @@ async def _export_tree_single(
                 lines.append(f"{header}\n\n{summary}\n\n")
             else:
                 lines.append(f"{header}\n\n")
-            await _export_tree_single(repo, node.path, lines, depth + 1, statuses)
+            await _export_tree_single(repo, node.path, lines, depth + 1,
+                                      statuses)
         else:
             content = (node.content or "").strip()
             if not content:
@@ -398,9 +397,8 @@ async def _export_tree_single(
             lines.append(f"{indent}- {content}\n")
 
 
-async def export_to_markdown(
-    db_path: Path, out_path: Path | None = None
-) -> str:
+async def export_to_markdown(db_path: Path,
+                             out_path: Path | None = None) -> str:
     """
     导出数据库到单文件 Markdown 字符串。若 out_path 指定则同时写入文件。
     （兼容 run.py --export 调用）
@@ -414,9 +412,11 @@ async def export_to_markdown(
             NodeStatus.PENDING_REVIEW,
             NodeStatus.PROCESSING,
         )
-        await _export_tree_single(
-            factory.repo, "root", lines, depth=0, statuses=statuses
-        )
+        await _export_tree_single(factory.repo,
+                                  "root",
+                                  lines,
+                                  depth=0,
+                                  statuses=statuses)
         md = "".join(lines)
         if out_path:
             out_path.write_text(md, encoding="utf-8")
@@ -427,6 +427,7 @@ async def export_to_markdown(
 
 
 # --- CLI ---
+
 
 def _get_default_db() -> Path:
     for name in ("openai_demo", "demo"):
@@ -440,9 +441,9 @@ async def _export_md(args: argparse.Namespace) -> None:
     factory = SQLiteUoWFactory(args.db)
     await factory.init()
     try:
-        exporter = MarkdownExporter(
-            factory.repo, args.out, only_active=args.only_active
-        )
+        exporter = MarkdownExporter(factory.repo,
+                                    args.out,
+                                    only_active=args.only_active)
         count = await exporter.export(args.root)
         print(f"✅  {count} 个文件 → {args.out}/")
     finally:

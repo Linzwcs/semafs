@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import logging
 from typing import Optional
 from uuid import uuid4
@@ -185,17 +184,26 @@ class Executor:
             return
 
         cat_path = NodePath(parent_path).child(name)
-        safe_cat_path = await uow.nodes.ensure_unique_path(cat_path)
+        existing_cat = await uow.nodes.get_by_path(str(cat_path))
 
-        new_cat = TreeNode.new_category(
-            path=safe_cat_path,
-            content=op.content,
-            display_name=op.name,
-            status=NodeStatus.ACTIVE,
-        )
-        uow.register_new(new_cat)
+        if existing_cat and existing_cat.node_type == NodeType.CATEGORY:
+            logger.info(f"目标目录 {cat_path} 已存在，执行无缝合入...")
+            safe_cat_path = NodePath(existing_cat.path)
+            existing_cat.request_semantic_rethink()
+            uow.register_dirty(existing_cat)
+        else:
+            safe_cat_path = await uow.nodes.ensure_unique_path(cat_path)
+            new_cat = TreeNode.new_category(
+                path=safe_cat_path,
+                content=op.content,
+                display_name=name,
+                status=NodeStatus.ACTIVE,
+                name_editable=True,
+            )
+            uow.register_new(new_cat)
 
         moved_count = 0
+
         for i, nid in enumerate(op.ids):
             node = resolve(nid)
 

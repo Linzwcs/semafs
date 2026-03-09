@@ -96,7 +96,7 @@ def _format_node_list(nodes: list) -> str:
 
 def _build_prompt(
     context: UpdateContext,
-    max_nodes: int,
+    max_children: int,
 ) -> Tuple[str, str]:
 
     all_nodes = list(context.active_nodes) + list(context.pending_nodes)
@@ -108,9 +108,40 @@ def _build_prompt(
     available_paths = "\n".join([f"  * {c.path}"
                                  for c in sub_cats]) or "  (当前无子分类)"
 
+    # 构建同级分类信息（用于避免命名冲突）
+    sibling_info = ""
+    if context.sibling_categories:
+        sibling_names = [f"'{s.name}'" for s in context.sibling_categories]
+        sibling_info = f"""
+<sibling_categories>
+当前目录的同级分类名称（更新 updated_name 时需避免与它们冲突）：
+  {', '.join(sibling_names)}
+</sibling_categories>"""
+
+    # 构建祖先层级信息（提供语义上下文）
+    ancestor_info = ""
+    if context.ancestor_categories:
+        ancestor_chain = []
+        for i, anc in enumerate(reversed(context.ancestor_categories)):
+            indent = "  " * i
+            summary = anc.content[:50] + "..." if len(
+                anc.content) > 50 else anc.content
+            ancestor_chain.append(f"{indent}└─ {anc.path}: {summary}")
+        ancestor_info = f"""
+<hierarchical_context>
+当前目录在知识树中的位置（从根到当前的父路径）：
+{''.join(ancestor_chain)}
+  {"  " * len(context.ancestor_categories)}└─ {context.parent.path} (当前目录)
+
+理解这个层级有助于你：
+1. 判断当前目录的语义边界（避免创建与上级重复的分类）
+2. 决定是否应该 should_dirty_parent=true（内容有重大变化时向上传播）
+3. 为新建的 GROUP 选择合适的抽象层级
+</hierarchical_context>"""
+
     # 强化版的 System Prompt
     system_prompt = f"""你是一个运行在 SemaFS (语义文件系统) 底层的知识图谱调度引擎。
-你的核心职责是：在保证【节点数不超过 {max_nodes} 个】的前提下，对当前的记忆碎片进行语义聚类和信息降维。
+你的核心职责是：在保证【节点数不超过 {max_children} 个】的前提下，对当前的记忆碎片进行语义聚类和信息降维。
 
 【核心算子 (Ops) 决策指南】
 请严格根据以下场景选择操作：
@@ -118,19 +149,21 @@ def _build_prompt(
    - ⚠️ 致命红线：MERGE 生成的 content 必须是所有原节点细节的「超集」。绝不允许丢失具体数值、时间、专有名词！可以将内容分段拼接，但不能用抽象废话替代具体细节。
 2. 🗂️ GROUP (新建分类)：当几个节点属于【同一个宽泛主题】但互为独立实体（例："前端框架规范"与"后端DB规范"）。
    - 将它们移入新创建的 CATEGORY 中。新 content 是对该主题的精简摘要。
+   - 创建 GROUP 时，请参考层级上下文，确保新分类的抽象级别合适（不与父级或祖先重复）
 3. ➡️ MOVE (移动到现有)：当某个节点完全符合下方列出的「可用子分类」时使用。
    - ⚠️ 致命红线：path_to_move 必须一字不差地从可用列表中复制，绝不可凭空捏造路径！
 
 【命名与格式红线】
 - `name` 字段：必须作为有效的文件路径节点，尽可能一个单词表示，多个单词用下划线连接。仅限使用小写英文、数字和下划线 (a-z, 0-9, _)，不超过 32 字符。例如: coffee_prefs, morning_routine。绝对禁止中文、大写或空格。
+- `updated_name` 字段：如果要更新当前目录的名称，请确保不与同级分类名称冲突（见下方 sibling_categories）
 
 【目录状态刷新】
 - `updated_content`：你必须基于执行操作后的剩余节点和新节点，重新撰写当前目录的完整摘要。
 - `should_dirty_parent`：如果本次整理提取出了全新的重要主题，或者改变了该目录的核心性质，设为 true 以触发级联更新。"""
 
     status_warning = ""
-    if total_count > max_nodes:
-        status_warning = f"🔴 严重警告：当前总节点数({total_count})已超出硬性上限({max_nodes})，你必须至少执行一次 MERGE 或 GROUP 操作来减少平行节点数量！"
+    if total_count > max_children:
+        status_warning = f"🔴 严重警告：当前总节点数({total_count})已超出硬性上限({max_children})，你必须至少执行一次 MERGE 或 GROUP 操作来减少平行节点数量！"
     elif context.pending_nodes:
         status_warning = f"🟡 提示：有新碎片进入。如果总数逼近上限，请主动整理以保持目录清爽。"
 
@@ -138,14 +171,15 @@ def _build_prompt(
     user_content = f"""<directory_status>
 - current_path: "{context.parent.path}"
 - current_name: "{context.parent.display_name or context.parent.name}"
-- capacity: {total_count}/{max_nodes}
+- capacity: {total_count}/{max_children}
 - alert: {status_warning}
 </directory_status>
 
 <current_directory_summary>
 {context.parent.content or '(空)'}
 </current_directory_summary>
-
+{sibling_info}
+{ancestor_info}
 <available_move_targets>
 {available_paths}
 </available_move_targets>
@@ -171,9 +205,9 @@ class BaseLLMAdapter(ABC):
         """调用具体 LLM API，返回 tree_ops 的 input dict。"""
         ...
 
-    async def call(self, context: UpdateContext, max_nodes: int) -> Dict:
+    async def call(self, context: UpdateContext, max_children: int) -> Dict:
 
-        system, user = _build_prompt(context, max_nodes)
+        system, user = _build_prompt(context, max_children)
         try:
             return await self._call_api(system, user)
         except Exception as e:

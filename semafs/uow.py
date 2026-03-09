@@ -38,7 +38,6 @@ class UnitOfWork(IUnitOfWork):
 
     async def commit(self) -> None:
         try:
-            # 先持久化 dirty（含 archive 的 _frag），再插入 new，避免状态更新被覆盖
             for node in self._dirty:
                 await self.repo.stage(node)
             for node in self._new:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import re
 from typing import List, Optional
@@ -6,8 +7,14 @@ from .core.enums import NodeType, NodeStatus
 from .core.exceptions import NodeNotFoundError, PlanExecutionError
 from .core.node import TreeNode, NodePath
 from .core.ops import UpdateContext
+from .core.views import (
+    NodeView,
+    TreeView,
+    RelatedNodes,
+    StatsView,
+)
 from .executor import Executor
-from .ports.strategy import LLMStrategy
+from .ports.strategy import Strategy
 from .ports.factory import UoWFactory
 
 logger = logging.getLogger(__name__)
@@ -17,7 +24,7 @@ class SemaFS:
 
     def __init__(self,
                  uow_factory: UoWFactory,
-                 strategy: LLMStrategy,
+                 strategy: Strategy,
                  executor: Optional[Executor] = None,
                  max_children: int = 10,
                  db_name: str = "default") -> None:
@@ -28,10 +35,12 @@ class SemaFS:
         self.db_name = db_name
 
     async def write(self, path: str, content: str, payload: dict) -> str:
+
         resolved = await self._resolve_category(path)
         fragment = TreeNode.new_fragment(parent_path=NodePath(resolved),
                                          content=content,
                                          payload=payload)
+
         async with self._uow_factory.begin() as uow:
             parent = await uow.nodes.get_by_path(resolved)
             if not parent or parent.node_type != NodeType.CATEGORY:
@@ -44,11 +53,212 @@ class SemaFS:
                     fragment.id[:8])
         return fragment.id
 
-    async def read(self, path: str) -> List[TreeNode]:
+    async def read(self, path: str) -> Optional[NodeView]:
+        """
+        获取单个节点的完整视图。
+
+        Args:
+            path: 节点路径
+
+        Returns:
+            NodeView 包含节点信息 + 导航上下文，节点不存在时返回 None
+        """
         node = await self._uow_factory.repo.get_by_path(path)
-        if not node: return []
-        if node.node_type == NodeType.LEAF: return [node]
-        return await self._uow_factory.repo.list_children(path)
+        if not node:
+            return None
+
+        # 并行获取上下文信息
+        children, siblings, ancestors = await asyncio.gather(
+            self._uow_factory.repo.list_children(path,
+                                                 statuses=[NodeStatus.ACTIVE]),
+            self._uow_factory.repo.list_sibling_categories(path),
+            self._uow_factory.repo.get_ancestor_categories(path),
+        )
+
+        breadcrumb = tuple(a.path for a in reversed(ancestors)) + (path, )
+
+        return NodeView(
+            node=node,
+            breadcrumb=breadcrumb,
+            child_count=len(children),
+            sibling_count=len(siblings),
+        )
+
+    async def list(self,
+                   path: str,
+                   include_archived: bool = False) -> List[NodeView]:
+        """
+        列出目录下的所有子节点（仅直接子节点，不递归）。
+
+        Args:
+            path: 目录路径
+            include_archived: 是否包含已归档节点
+
+        Returns:
+            NodeView 列表（按路径排序）
+        """
+        statuses = [NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW]
+        if include_archived:
+            statuses.append(NodeStatus.ARCHIVED)
+
+        children = await self._uow_factory.repo.list_children(path, statuses)
+
+        views = []
+        for child in children:
+            child_count = 0
+            if child.node_type == NodeType.CATEGORY:
+                grandchildren = await self._uow_factory.repo.list_children(
+                    child.path, statuses=[NodeStatus.ACTIVE])
+                child_count = len(grandchildren)
+
+            siblings = await self._uow_factory.repo.list_sibling_categories(
+                child.path)
+            ancestors = await self._uow_factory.repo.get_ancestor_categories(
+                child.path)
+            breadcrumb = tuple(a.path
+                               for a in reversed(ancestors)) + (child.path, )
+
+            views.append(
+                NodeView(
+                    node=child,
+                    breadcrumb=breadcrumb,
+                    child_count=child_count,
+                    sibling_count=len(siblings),
+                ))
+
+        return sorted(views, key=lambda v: v.path)
+
+    async def view_tree(self,
+                        path: str = "root",
+                        max_depth: int = 3) -> Optional[TreeView]:
+        """
+        获取树形视图（递归展示子树）。
+
+        Args:
+            path: 根节点路径
+            max_depth: 最大递归深度（防止深层嵌套导致性能问题）
+
+        Returns:
+            TreeView 包含完整子树结构，节点不存在时返回 None
+        """
+        node = await self._uow_factory.repo.get_by_path(path)
+        if not node:
+            return None
+
+        return await self._build_tree_view(node, depth=0, max_depth=max_depth)
+
+    async def _build_tree_view(self, node: TreeNode, depth: int,
+                               max_depth: int) -> TreeView:
+        """递归构建树形视图。"""
+        children_views = ()
+
+        if node.node_type == NodeType.CATEGORY and depth < max_depth:
+            children = await self._uow_factory.repo.list_children(
+                node.path, statuses=[NodeStatus.ACTIVE])
+            children_views = tuple([
+                await self._build_tree_view(child, depth + 1, max_depth)
+                for child in children
+            ])
+
+        return TreeView(node=node, children=children_views, depth=depth)
+
+    async def get_related(self, path: str) -> Optional[RelatedNodes]:
+        """
+        获取节点的相关节点（导航地图）。
+
+        Args:
+            path: 节点路径
+
+        Returns:
+            RelatedNodes 包含父节点、兄弟节点、子节点、祖先链
+        """
+        current_view = await self.read(path)
+        if not current_view:
+            return None
+
+        node = current_view.node
+        np = NodePath(path)
+
+        parent_node, sibling_nodes, children_nodes, ancestor_nodes = (
+            await asyncio.gather(
+                self._uow_factory.repo.get_by_path(str(np.parent))
+                if not np.is_root else None,
+                self._uow_factory.repo.list_sibling_categories(path),
+                self._uow_factory.repo.list_children(
+                    path, statuses=[NodeStatus.ACTIVE])
+                if node.node_type == NodeType.CATEGORY else [],
+                self._uow_factory.repo.get_ancestor_categories(path),
+            ))
+
+        # 构建 NodeView
+        parent_view = None
+        if parent_node:
+            parent_view = await self.read(parent_node.path)
+
+        sibling_views = []
+        for sib in sibling_nodes:
+            view = await self.read(sib.path)
+            if view:
+                sibling_views.append(view)
+
+        children_views = []
+        for child in children_nodes:
+            view = await self.read(child.path)
+            if view:
+                children_views.append(view)
+
+        ancestor_views = []
+        for anc in ancestor_nodes:
+            view = await self.read(anc.path)
+            if view:
+                ancestor_views.append(view)
+
+        return RelatedNodes(
+            current=current_view,
+            parent=parent_view,
+            siblings=tuple(sibling_views),
+            children=tuple(children_views),
+            ancestors=tuple(ancestor_views),
+        )
+
+    async def stats(self) -> StatsView:
+        """
+        获取知识库的统计信息。
+
+        Returns:
+            StatsView 包含节点数量、深度、热门目录等统计数据
+        """
+        repo = self._uow_factory.repo
+
+        all_categories = await repo.list_all_categories()
+        dirty_categories = await repo.list_dirty_categories()
+
+        total_leaves = 0
+        max_depth = 0
+        category_child_counts = []
+
+        for cat in all_categories:
+            depth = NodePath(cat.path).depth
+            max_depth = max(max_depth, depth)
+
+            children = await repo.list_children(cat.path,
+                                                statuses=[NodeStatus.ACTIVE])
+            leaves = [c for c in children if c.node_type == NodeType.LEAF]
+            total_leaves += len(leaves)
+
+            if len(children) > 0:
+                category_child_counts.append((cat.path, len(children)))
+
+        top_categories = tuple(
+            sorted(category_child_counts, key=lambda x: -x[1])[:10])
+
+        return StatsView(
+            total_categories=len(all_categories),
+            total_leaves=total_leaves,
+            max_depth=max_depth,
+            dirty_categories=len(dirty_categories),
+            top_categories=top_categories,
+        )
 
     async def maintain(self) -> int:
         dirty_cats = await self._uow_factory.repo.list_dirty_categories()
@@ -74,15 +284,29 @@ class SemaFS:
             category = await uow.repo.get_by_path(path)
             if not category or category.node_type != NodeType.CATEGORY:
                 return False
-            all_children = await uow.repo.list_children(
-                path, statuses=[NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW])
+
+            # 并行获取所有上下文信息
+            all_children, siblings, ancestors = await asyncio.gather(
+                uow.repo.list_children(
+                    path,
+                    statuses=[NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW]),
+                uow.repo.list_sibling_categories(path),
+                uow.repo.get_ancestor_categories(path, max_depth=3),
+            )
+
             active = tuple(c for c in all_children
                            if c.status == NodeStatus.ACTIVE)
             pending = tuple(c for c in all_children
                             if c.status == NodeStatus.PENDING_REVIEW)
-            context = UpdateContext(parent=category,
-                                    active_nodes=active,
-                                    pending_nodes=pending)
+
+            context = UpdateContext(
+                parent=category,
+                active_nodes=active,
+                pending_nodes=pending,
+                sibling_categories=tuple(siblings),
+                ancestor_categories=tuple(ancestors),
+            )
+
             total_nodes = len(context.all_nodes)
             if not pending and total_nodes <= self._max_children:
                 category.clear_dirty()

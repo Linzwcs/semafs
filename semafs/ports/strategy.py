@@ -4,7 +4,7 @@ from ..core.ops import RebalancePlan, UpdateContext
 
 
 @runtime_checkable
-class LLMStrategy(Protocol):
+class Strategy(Protocol):
     """
     整理策略大脑。
 
