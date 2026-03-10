@@ -74,9 +74,9 @@ _TREE_OPS_SCHEMA = {
                             "type":
                             "string",
                             "description":
-                            "System name for the resulting node. Must be lowercase English, "
-                            "words separated by underscores (e.g., java_backend_specs). "
-                            "No Chinese or special characters allowed!"
+                            "Category/node name. Use dots to create hierarchy: "
+                            "tech.advice creates tech/advice subcategory chain. Lowercase a-z, 0-9 only. "
+                            "Examples: coffee, tech.advice, work.project.api."
                         },
                         "content": {
                             "type":
@@ -214,23 +214,34 @@ Understanding this hierarchy helps you:
     system_prompt = f"""You are a knowledge graph scheduling engine running inside SemaFS (Semantic File System).
 Your core responsibility: Semantically cluster and reduce information while keeping node count under {max_children}.
 
-【Operation Decision Guide】
-Choose operations based on these scenarios:
-1. 🟩 MERGE (combine leaves): When nodes describe DIFFERENT ASPECTS OF THE SAME THING
-   (e.g., "likes Americano" and "drinks coffee without sugar").
+【Operation Priority Guide - IMPORTANT】
+Operations are prioritized in this order. Use the FIRST applicable operation:
+
+1. ➡️ MOVE (highest priority): Use when a node perfectly fits an EXISTING subcategory.
+   - ⚠️ CRITICAL: path_to_move must be copied EXACTLY from available_move_targets!
+   - This is the cheapest operation - no new categories, no content loss.
+
+2. 🗂️ GROUP (second priority): Use when no suitable existing category exists, but nodes share a common topic.
+   - Create a new CATEGORY to organize related nodes together.
+   - Nodes belong to the SAME BROAD TOPIC but are independent entities
+     (e.g., "frontend framework specs" and "backend DB specs").
+   - Check hierarchical context to ensure appropriate abstraction level.
+
+3. 🟩 MERGE (last resort): Only use when nodes describe DIFFERENT ASPECTS OF THE SAME THING.
+   - ⚠️ WARNING: MERGE loses granularity. Prefer GROUP when nodes are related but distinct!
+   - Example: "likes Americano" and "drinks coffee without sugar" → same topic (coffee preferences).
    - ⚠️ CRITICAL: MERGE content must be a SUPERSET of all original details.
      Never lose specific values, dates, or proper nouns! You may concatenate with sections.
-2. 🗂️ GROUP (create category): When nodes belong to the SAME BROAD TOPIC but are independent entities
-   (e.g., "frontend framework specs" and "backend DB specs").
-   - Move them into a newly created CATEGORY. The content is a concise topic summary.
-   - When creating GROUP, check hierarchical context to ensure appropriate abstraction level.
-3. ➡️ MOVE (to existing): When a node perfectly fits an available subcategory below.
-   - ⚠️ CRITICAL: path_to_move must be copied EXACTLY from the available list!
 
 【Naming and Formatting Rules】
-- `name` field: Must be a valid path segment. Prefer single words; use underscores for multiple words.
-  Only lowercase letters, numbers, underscores (a-z, 0-9, _). Max 32 chars.
-  Example: coffee_prefs, morning_routine. NO Chinese, uppercase, or spaces.
+- `name` field: Use DOTS to create HIERARCHY (relative to current directory)!
+  ⚠️ DO NOT repeat current directory name! Name is RELATIVE, not absolute.
+  If current_path is "root.work.guidelines", use "api" NOT "guidelines.api"!
+  ✅ Good: coffee, tech.advice, project.backend (relative names)
+  ❌ Bad: work.coffee, guidelines.tech (repeating parent name)
+  Each segment: lowercase letters/numbers only (a-z, 0-9), max 16 chars per segment.
+- ⚠️ UNIQUE NAMES: All `name` values in ops MUST be unique within this plan!
+  Same prefix = merge into same category (e.g., "tech.api" and "tech.db" both go under "tech").
 - `updated_name` field: Ensure no conflict with sibling category names (see sibling_categories).
 
 【Directory State Refresh】

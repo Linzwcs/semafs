@@ -99,6 +99,9 @@ class Executor:
         placed inside that category. Otherwise, uses ensure_unique_path to
         avoid conflicts with existing leaves.
 
+        Also checks against paths used within the current batch to prevent
+        UNIQUE constraint violations on commit.
+
         Args:
             parent_path: Path of the parent category.
             name: Preferred name for the leaf.
@@ -122,16 +125,37 @@ class Executor:
             uow.register_dirty(existing)
             child_path = preferred.child(
                 f"{fallback_prefix}_{uuid4().hex[:6]}")
-            return await uow.nodes.ensure_unique_path(child_path)
+            final_path = await uow.nodes.ensure_unique_path(child_path)
+        else:
+            # Normal case: ensure unique path at the same level
+            final_path = await uow.nodes.ensure_unique_path(preferred)
 
-        # Normal case: ensure unique path at the same level
-        return await uow.nodes.ensure_unique_path(preferred)
+        # Check against batch-local used paths and add suffix if needed
+        final_path_str = str(final_path)
+        if final_path_str in self._used_paths:
+            # Path already used in this batch, add unique suffix
+            suffix = 1
+            while True:
+                new_path = NodePath(parent_path).child(f"{slug_name}{suffix}")
+                new_path_str = str(new_path)
+                if new_path_str not in self._used_paths:
+                    # Also check DB for this new path
+                    final_path = await uow.nodes.ensure_unique_path(new_path)
+                    final_path_str = str(final_path)
+                    if final_path_str not in self._used_paths:
+                        break
+                suffix += 1
+
+        # Register this path as used in current batch
+        self._used_paths.add(final_path_str)
+        return final_path
 
     async def execute(
         self,
         plan: RebalancePlan,
         context: UpdateContext,
         uow: UnitOfWork,
+        max_children: int = 10,
     ) -> None:
         """
         Execute a reorganization plan.
@@ -144,10 +168,16 @@ class Executor:
             plan: The RebalancePlan containing operations to execute.
             context: Snapshot of category state (used for node lookup).
             uow: UnitOfWork for registering changes (caller commits).
+            max_children: Maximum allowed children per category. Used to
+                mark new categories as dirty if they exceed this limit.
 
         Raises:
             PlanExecutionError: If an operation fails irrecoverably.
         """
+        self._max_children = max_children
+        # Track paths used within this batch to prevent UNIQUE constraint violations
+        self._used_paths: set[str] = set()
+
         logger.debug(
             "[Executor] Starting plan execution: %s | parent=%s",
             plan.ops_summary,
@@ -284,6 +314,67 @@ class Executor:
             safe_path,
         )
 
+    async def _ensure_category_chain(
+        self,
+        parent_path: str,
+        name_parts: list[str],
+        content: str,
+        uow: UnitOfWork,
+    ) -> tuple[NodePath, Optional[TreeNode]]:
+        """
+        Ensure a chain of categories exists, creating them if needed.
+
+        When name contains underscores (e.g., "tech_advice_group"), this creates
+        a hierarchy: parent_path.tech.advice.group
+
+        Args:
+            parent_path: Starting parent path.
+            name_parts: List of path segments (split by underscore).
+            content: Content for the leaf category.
+            uow: UnitOfWork for registering changes.
+
+        Returns:
+            Tuple of (final_path, leaf_category_node or None if existing).
+        """
+        current_path = parent_path
+        leaf_cat: Optional[TreeNode] = None
+
+        for i, part in enumerate(name_parts):
+            is_leaf = (i == len(name_parts) - 1)
+            cat_path = NodePath(current_path).child(part)
+            cat_path_str = str(cat_path)
+
+            existing = await uow.nodes.get_by_path(cat_path_str)
+
+            if existing and existing.node_type == NodeType.CATEGORY:
+                # Category exists, use it
+                if is_leaf:
+                    existing.request_semantic_rethink()
+                    uow.register_dirty(existing)
+                    leaf_cat = existing
+                current_path = cat_path_str
+            elif cat_path_str in self._used_paths:
+                # Created in this batch
+                current_path = cat_path_str
+                # leaf_cat stays None for batch-created categories
+            else:
+                # Create new category
+                self._used_paths.add(cat_path_str)
+                new_cat = TreeNode.new_category(
+                    path=cat_path,
+                    content=content if is_leaf else f"Category: {part}",
+                    display_name=part,
+                    status=NodeStatus.ACTIVE,
+                    name_editable=True,
+                )
+                uow.register_new(new_cat)
+                if is_leaf:
+                    leaf_cat = new_cat
+                current_path = cat_path_str
+                logger.debug("[Executor] Created category: %s", cat_path_str)
+
+        return NodePath(current_path), leaf_cat
+
     async def _do_group(
         self,
         op: GroupOp,
@@ -297,6 +388,9 @@ class Executor:
         Original leaves are archived and recreated under the new category.
         If the target category already exists, leaves are merged into it.
 
+        When name contains dots (e.g., "tech.advice"), it creates
+        a hierarchy: parent.tech.advice
+
         Args:
             op: The GroupOp to execute.
             context: Current context snapshot.
@@ -304,32 +398,44 @@ class Executor:
             resolve: Function to resolve node IDs.
         """
         parent_path = context.parent.path
-        name = _slug(op.name)
-        if not name:
-            logger.warning("[Executor] GROUP: Invalid name, skipping")
+
+        # Parse name: split by dot to create hierarchy
+        # e.g., "tech.advice.group" -> ["tech", "advice", "group"]
+        raw_name = op.name.strip().lower()
+        # Split by dot (primary) or underscore (fallback for compatibility)
+        import re
+        # Replace underscores with dots for backward compatibility
+        raw_name = raw_name.replace("_", ".")
+        name_parts = [
+            re.sub(r"[^a-z0-9]", "", part) for part in raw_name.split(".")
+            if part
+        ]
+        name_parts = [p for p in name_parts if p]
+
+        if not name_parts:
+            logger.warning("[Executor] GROUP: Invalid name '%s', skipping",
+                           op.name)
             return
 
-        cat_path = NodePath(parent_path).child(name)
-        existing_cat = await uow.nodes.get_by_path(str(cat_path))
+        # Strip leading parts that duplicate parent path segments
+        # e.g., if parent is "root.work.guidelines" and name is "guidelines.api",
+        # we should use just "api" to avoid "root.work.guidelines.guidelines.api"
+        parent_parts = parent_path.split(".")
+        while name_parts and name_parts[0] in parent_parts:
+            removed = name_parts.pop(0)
+            logger.debug(
+                "[Executor] GROUP: Stripped duplicate segment '%s' from name",
+                removed)
 
-        # Handle existing category (seamless merge)
-        if existing_cat and existing_cat.node_type == NodeType.CATEGORY:
-            logger.info(
-                f"Target directory {cat_path} exists, merging into it...")
-            safe_cat_path = NodePath(existing_cat.path)
-            existing_cat.request_semantic_rethink()
-            uow.register_dirty(existing_cat)
-        else:
-            # Create new category
-            safe_cat_path = await uow.nodes.ensure_unique_path(cat_path)
-            new_cat = TreeNode.new_category(
-                path=safe_cat_path,
-                content=op.content,
-                display_name=name,
-                status=NodeStatus.ACTIVE,
-                name_editable=True,
-            )
-            uow.register_new(new_cat)
+        if not name_parts:
+            logger.warning(
+                "[Executor] GROUP: Name '%s' only contains parent path segments, skipping",
+                op.name)
+            return
+
+        # Create category chain and get the leaf category
+        safe_cat_path, target_cat = await self._ensure_category_chain(
+            parent_path, name_parts, op.content, uow)
 
         moved_count = 0
 
@@ -346,9 +452,27 @@ class Executor:
             node.archive()
             uow.register_dirty(node)
 
-            # Create copy under new category
-            child_path = safe_cat_path.child(f"leaf_{uuid4().hex[:6]}")
+            # Create copy under new category with unique path
+            child_name = f"leaf_{uuid4().hex[:6]}"
+            child_path = safe_cat_path.child(child_name)
+            child_path_str = str(child_path)
+
+            # Check batch-local used paths
+            if child_path_str in self._used_paths:
+                suffix = 1
+                while True:
+                    new_child_path = safe_cat_path.child(
+                        f"{child_name}{suffix}")
+                    new_child_path_str = str(new_child_path)
+                    if new_child_path_str not in self._used_paths:
+                        child_path = new_child_path
+                        child_path_str = new_child_path_str
+                        break
+                    suffix += 1
+
             safe_child = await uow.nodes.ensure_unique_path(child_path)
+            safe_child_str = str(safe_child)
+            self._used_paths.add(safe_child_str)
 
             new_leaf = TreeNode.new_leaf(
                 path=safe_child,
@@ -367,6 +491,15 @@ class Executor:
             safe_cat_path,
             moved_count,
         )
+
+        # Check if new category exceeds max_children limit
+        # If so, mark it as dirty for further reorganization
+        if moved_count > self._max_children and target_cat is not None:
+            target_cat.request_semantic_rethink()
+            uow.register_dirty(target_cat)
+            logger.info(
+                "[Executor] GROUP: Category %s has %d nodes (> %d), marked dirty for further reorg",
+                target_cat.path, moved_count, self._max_children)
 
     async def _do_move(
         self,

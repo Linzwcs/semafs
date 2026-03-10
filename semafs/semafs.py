@@ -480,7 +480,8 @@ class SemaFS:
         # Execute the plan
         async with self._uow_factory.begin() as uow:
             try:
-                await self._executor.execute(plan, context, uow)
+                await self._executor.execute(plan, context, uow,
+                                             max_children=self._max_children)
 
                 # Finish processing for all nodes still in PROCESSING state
                 # - Successfully processed nodes: already ARCHIVED, won't be affected
