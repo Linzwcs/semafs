@@ -241,14 +241,3 @@ Contributions welcome! Please:
 ## 📄 License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
-
----
-
-<div align="center">
-
-**SemaFS** — *Pioneering LLM-native architecture for autonomous knowledge organization*
-
-[⭐ Star us on GitHub](https://github.com/linzwcs/semafs) • [📖 Read the Docs](CLAUDE.md) • [🐛 Report Issues](https://github.com/linzwcs/semafs/issues)
-
-</div>
