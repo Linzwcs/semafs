@@ -1,8 +1,38 @@
+"""
+SQLite repository implementation for SemaFS.
+
+This module provides SQLiteRepository, which implements the NodeRepository
+protocol using SQLite as the storage backend.
+
+Design Decisions:
+    - Uses asyncio.to_thread() to wrap synchronous sqlite3 calls
+    - Single table (semafs_nodes) with composite key (parent_path, name)
+    - WAL mode for better concurrency
+    - Unique constraint prevents duplicate paths for non-ARCHIVED nodes
+
+Schema:
+    - id: UUID primary key
+    - parent_path: Path to parent (empty for root's children)
+    - name: Node name (last segment of path)
+    - node_type: CATEGORY or LEAF
+    - status: ACTIVE, ARCHIVED, PENDING_REVIEW, PROCESSING
+    - content, display_name, payload, tags: Node data
+    - is_dirty, version, access_count: State tracking
+    - created_at, updated_at, last_accessed_at: Timestamps
+
+Usage:
+    conn = sqlite3.connect("semafs.db")
+    repo = SQLiteRepository(conn)
+
+    node = await repo.get_by_path("root.work")
+    children = await repo.list_children("root.work")
+"""
 from __future__ import annotations
 import asyncio
 import json
 import logging
 import sqlite3
+import uuid
 from typing import List, Optional
 from ...ports.repo import NodeRepository
 from ...core.enums import NodeStatus, NodeType
@@ -10,6 +40,7 @@ from ...core.node import NodePath, TreeNode
 
 logger = logging.getLogger(__name__)
 
+# Database schema definition
 _DDL = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -31,24 +62,37 @@ CREATE TABLE IF NOT EXISTS semafs_nodes (
     access_count    INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    last_accessed_at TEXT NOT NULL,
-
-    -- 同一 (parent_path, name) 只能有一个非 ARCHIVED 节点
-    UNIQUE(parent_path, name)
+    last_accessed_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_semafs_parent ON semafs_nodes(parent_path);
 CREATE INDEX IF NOT EXISTS idx_semafs_status  ON semafs_nodes(status);
 CREATE INDEX IF NOT EXISTS idx_semafs_dirty   ON semafs_nodes(is_dirty, node_type, status);
+
+-- Only one non-ARCHIVED node per (parent_path, name)
+-- Using partial unique index to allow archived nodes with the same original path
+CREATE UNIQUE INDEX IF NOT EXISTS idx_semafs_unique_path
+    ON semafs_nodes(parent_path, name)
+    WHERE status != 'ARCHIVED';
 """
 
 
 def _row_to_node(row: sqlite3.Row) -> TreeNode:
-    """将数据库行反序列化为 TreeNode。"""
+    """
+    Deserialize a database row to TreeNode.
+
+    Handles datetime parsing with fallback for timezone variations.
+
+    Args:
+        row: SQLite Row object with node columns.
+
+    Returns:
+        Reconstructed TreeNode instance.
+    """
     from datetime import datetime, timezone
 
     def _parse_dt(s: str) -> datetime:
-        # 兼容带/不带时区的 ISO 格式
+        """Parse ISO datetime string, fallback to current UTC on failure."""
         try:
             return datetime.fromisoformat(s)
         except Exception:
@@ -77,15 +121,46 @@ def _row_to_node(row: sqlite3.Row) -> TreeNode:
 
 class SQLiteRepository(NodeRepository):
     """
-    同步 sqlite3 包装为异步接口，实现 NodeRepository 协议。
+    SQLite implementation of NodeRepository.
 
-    所有 IO 操作通过 asyncio.to_thread 在线程池中执行。
+    Wraps synchronous sqlite3 operations with asyncio.to_thread() to
+    provide an async interface compatible with the repository protocol.
+
+    All read and write operations execute SQL but don't commit until
+    commit() is called, following the Unit of Work pattern.
+
+    Attributes:
+        _conn: SQLite connection (shared with UoWFactory).
+
+    Thread Safety:
+        Operations are serialized via asyncio.Lock in SQLiteUoWFactory.
+        The connection is created with check_same_thread=False.
+
+    Example:
+        repo = SQLiteRepository(conn)
+
+        # Read operations
+        node = await repo.get_by_path("root.work")
+        children = await repo.list_children("root.work")
+
+        # Write operations (within UoW)
+        await repo.stage(modified_node)
+        await repo.commit()
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
+        """
+        Initialize the repository with a SQLite connection.
+
+        Args:
+            conn: SQLite connection (caller manages lifecycle).
+        """
         self._conn = conn
 
+    # ==================== Synchronous Internal Methods ====================
+
     def _get_by_path_sync(self, path: str) -> Optional[TreeNode]:
+        """Get node by path (sync, excludes ARCHIVED)."""
         np = NodePath(path)
         cur = self._conn.execute(
             "SELECT * FROM semafs_nodes "
@@ -97,6 +172,7 @@ class SQLiteRepository(NodeRepository):
         return _row_to_node(row) if row else None
 
     def _get_by_id_sync(self, node_id: str) -> Optional[TreeNode]:
+        """Get node by UUID (sync, includes all statuses)."""
         cur = self._conn.execute("SELECT * FROM semafs_nodes WHERE id=?",
                                  (node_id, ))
         cur.row_factory = sqlite3.Row
@@ -104,7 +180,13 @@ class SQLiteRepository(NodeRepository):
         return _row_to_node(row) if row else None
 
     def _save_sync(self, node: TreeNode) -> None:
-        """先 UPDATE 已存在行（确保 archive 等状态变更持久化），不存在则 INSERT。"""
+        """
+        Upsert a node (UPDATE if exists, INSERT otherwise).
+
+        This ensures status changes (like archive) persist correctly.
+        The operation is not committed until commit() is called.
+        """
+        # Try UPDATE first
         cur = self._conn.execute(
             "UPDATE semafs_nodes SET "
             "parent_path=?, name=?, status=?, content=?, display_name=?, "
@@ -129,6 +211,8 @@ class SQLiteRepository(NodeRepository):
         )
         if cur.rowcount > 0:
             return
+
+        # INSERT if UPDATE didn't match
         self._conn.execute(
             """
             INSERT INTO semafs_nodes
@@ -163,6 +247,7 @@ class SQLiteRepository(NodeRepository):
         path: str,
         statuses: Optional[List[NodeStatus]] = None,
     ) -> List[TreeNode]:
+        """List direct children with optional status filter (sync)."""
         if statuses is None:
             statuses = [
                 NodeStatus.ACTIVE,
@@ -180,6 +265,7 @@ class SQLiteRepository(NodeRepository):
         return [_row_to_node(r) for r in cur.fetchall()]
 
     def _list_dirty_categories_sync(self) -> List[TreeNode]:
+        """List all categories with is_dirty=True (sync)."""
         cur = self._conn.execute(
             "SELECT * FROM semafs_nodes "
             "WHERE node_type='CATEGORY' AND is_dirty=1 AND status != 'ARCHIVED'"
@@ -188,6 +274,7 @@ class SQLiteRepository(NodeRepository):
         return [_row_to_node(r) for r in cur.fetchall()]
 
     def _list_all_categories_sync(self) -> List[TreeNode]:
+        """List all non-archived categories (sync)."""
         cur = self._conn.execute(
             "SELECT * FROM semafs_nodes "
             "WHERE node_type='CATEGORY' AND status != 'ARCHIVED'")
@@ -195,6 +282,7 @@ class SQLiteRepository(NodeRepository):
         return [_row_to_node(r) for r in cur.fetchall()]
 
     def _path_exists_sync(self, path: str) -> bool:
+        """Check if a non-archived node exists at path (sync)."""
         np = NodePath(path)
         cur = self._conn.execute(
             "SELECT 1 FROM semafs_nodes "
@@ -204,18 +292,21 @@ class SQLiteRepository(NodeRepository):
         return cur.fetchone() is not None
 
     def _ensure_unique_path_sync(self, preferred: NodePath) -> NodePath:
+        """Generate unique path by appending suffix if needed (sync)."""
         if not self._path_exists_sync(str(preferred)):
             return preferred
         i = 1
         while True:
-            candidate = NodePath(f"{preferred}_{i}")
+            candidate = NodePath(f"{preferred}_{uuid.uuid4().hex[:6]}")
             if not self._path_exists_sync(str(candidate)):
                 return candidate
             i += 1
             if i > 100:
-                raise RuntimeError(f"路径冲突无法解决: {preferred}")
+                raise RuntimeError(
+                    f"Unable to resolve path conflict: {preferred}")
 
     def _cascade_rename_sync(self, old_path: str, new_path: str) -> None:
+        """Update parent_path for all descendants after rename (sync)."""
         self._conn.execute(
             """
             UPDATE semafs_nodes
@@ -226,10 +317,10 @@ class SQLiteRepository(NodeRepository):
         )
 
     def _list_sibling_categories_sync(self, path: str) -> List[TreeNode]:
-        """获取与指定节点同级的所有 CATEGORY 节点（不包括指定节点自身）。"""
+        """Get sibling CATEGORY nodes at the same level (sync)."""
         np = NodePath(path)
         if np.is_root:
-            return []  # root 没有兄弟节点
+            return []  # Root has no siblings
         cur = self._conn.execute(
             "SELECT * FROM semafs_nodes "
             "WHERE parent_path=? AND node_type='CATEGORY' AND status='ACTIVE' AND name!=?",
@@ -239,9 +330,10 @@ class SQLiteRepository(NodeRepository):
         return [_row_to_node(r) for r in cur.fetchall()]
 
     def _get_ancestor_categories_sync(
-        self, path: str, max_depth: Optional[int] = None
-    ) -> List[TreeNode]:
-        """获取从指定节点到 root 的祖先 CATEGORY 链（从近到远）。"""
+            self,
+            path: str,
+            max_depth: Optional[int] = None) -> List[TreeNode]:
+        """Get ancestor chain from node to root (nearest first, sync)."""
         ancestors = []
         current = NodePath(path)
         depth = 0
@@ -259,28 +351,37 @@ class SQLiteRepository(NodeRepository):
         return ancestors
 
     def _commit_sync(self) -> None:
+        """Commit the current transaction (sync)."""
         self._conn.commit()
 
     def _rollback_sync(self) -> None:
+        """Rollback the current transaction (sync)."""
         self._conn.rollback()
 
+    # ==================== Async Public Interface ====================
+
     async def get_by_path(self, path: str) -> Optional[TreeNode]:
+        """Get node by path (async wrapper)."""
         return await asyncio.to_thread(self._get_by_path_sync, path)
 
     async def get_by_id(self, node_id: str) -> Optional[TreeNode]:
+        """Get node by UUID (async wrapper)."""
         return await asyncio.to_thread(self._get_by_id_sync, node_id)
 
     async def stage(self, node: TreeNode) -> None:
-        """暂存节点变更（执行 SQL，不提交事务）。"""
+        """Stage node changes (execute SQL but don't commit)."""
         await asyncio.to_thread(self._save_sync, node)
 
     async def cascade_rename(self, old_path: str, new_path: str) -> None:
+        """Stage cascade rename operation."""
         await asyncio.to_thread(self._cascade_rename_sync, old_path, new_path)
 
     async def commit(self) -> None:
+        """Commit all staged changes."""
         await asyncio.to_thread(self._commit_sync)
 
     async def rollback(self) -> None:
+        """Rollback all staged changes."""
         await asyncio.to_thread(self._rollback_sync)
 
     async def list_children(
@@ -288,28 +389,36 @@ class SQLiteRepository(NodeRepository):
         path: str,
         statuses: Optional[List[NodeStatus]] = None,
     ) -> List[TreeNode]:
+        """List direct children with optional status filter."""
         return await asyncio.to_thread(self._list_children_sync, path,
                                        statuses)
 
     async def list_dirty_categories(self) -> List[TreeNode]:
+        """List all categories needing maintenance."""
         return await asyncio.to_thread(self._list_dirty_categories_sync)
 
     async def list_all_categories(self) -> List[TreeNode]:
+        """List all non-archived categories."""
         return await asyncio.to_thread(self._list_all_categories_sync)
 
     async def path_exists(self, path: str) -> bool:
+        """Check if a non-archived node exists at path."""
         return await asyncio.to_thread(self._path_exists_sync, path)
 
     async def ensure_unique_path(self, preferred: NodePath) -> NodePath:
+        """Generate unique path by appending suffix if needed."""
         return await asyncio.to_thread(self._ensure_unique_path_sync,
                                        preferred)
 
     async def list_sibling_categories(self, path: str) -> List[TreeNode]:
+        """Get sibling CATEGORY nodes at the same level."""
         return await asyncio.to_thread(self._list_sibling_categories_sync,
                                        path)
 
     async def get_ancestor_categories(
-        self, path: str, max_depth: Optional[int] = None
-    ) -> List[TreeNode]:
+            self,
+            path: str,
+            max_depth: Optional[int] = None) -> List[TreeNode]:
+        """Get ancestor chain from node to root (nearest first)."""
         return await asyncio.to_thread(self._get_ancestor_categories_sync,
                                        path, max_depth)

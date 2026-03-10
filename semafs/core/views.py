@@ -1,11 +1,30 @@
 """
-视图层：为 LLM 提供结构化的记忆查询视图。
+View layer: Structured query views for the knowledge tree.
 
-设计哲学：
-1. 结构化：返回专门的视图对象，而非原始 TreeNode 列表
-2. 语义化：每个视图对象都有明确的语义和用途
-3. LLM 友好：提供面包屑、统计信息、导航提示
-4. 不可变：所有视图对象都是 frozen dataclass
+This module defines immutable view objects that provide structured access
+to the knowledge tree for both LLM consumption and API responses.
+
+Design Philosophy:
+    1. Views are data containers, NOT TreeNodes - they're optimized for reading
+    2. Each view has a specific semantic purpose (single node, tree, navigation)
+    3. Views include navigation context (breadcrumbs, counts) for LLM orientation
+    4. All views are frozen dataclasses - immutable after creation
+    5. Rendering is delegated to Renderer classes (separation of concerns)
+
+View Types:
+    - NodeView: Single node with navigation context
+    - TreeView: Recursive tree structure for exploration
+    - RelatedNodes: Navigation map showing surrounding nodes
+    - StatsView: Knowledge base statistics and metrics
+
+Usage:
+    # Get a single node with context
+    view = await semafs.read("root.work")
+    print(f"Path: {view.path}, Children: {view.child_count}")
+
+    # Get tree structure
+    tree = await semafs.view_tree("root", max_depth=3)
+    print(f"Total nodes: {tree.total_nodes}")
 """
 from __future__ import annotations
 
@@ -19,31 +38,58 @@ from .enums import NodeType
 @dataclass(frozen=True)
 class NodeView:
     """
-    单个节点的完整视图。
+    Comprehensive view of a single node with navigation context.
 
-    提供节点本身的信息 + 上下文导航信息（面包屑、兄弟数量等）。
-    适用于：详情页、单节点查询、LLM 快速理解节点位置。
+    NodeView provides everything needed to understand a node's position
+    and role in the knowledge tree. It includes the node itself plus
+    contextual information like breadcrumbs and neighbor counts.
+
+    This view is optimized for:
+    - Detail pages showing a specific node
+    - LLM context when reasoning about a specific location
+    - API responses for single-node queries
+
+    Attributes:
+        node: The underlying TreeNode.
+        breadcrumb: Tuple of paths from root to this node (inclusive).
+        child_count: Number of ACTIVE children (for CATEGORYs only).
+        sibling_count: Number of ACTIVE sibling CATEGORYs at same level.
+
+    Properties:
+        path: Shortcut to node.path.
+        is_category: True if this is a CATEGORY node.
+        summary: Formatted string with path and content preview.
+
+    Example:
+        >>> view = await semafs.read("root.work.projects")
+        >>> print(view.breadcrumb)
+        ('root', 'root.work', 'root.work.projects')
+        >>> print(view.child_count)
+        5
     """
-
     node: TreeNode
-    breadcrumb: Tuple[str, ...]  # 从 root 到当前节点的路径链
-    child_count: int  # 子节点数量（仅 ACTIVE）
-    sibling_count: int  # 同级节点数量（仅 ACTIVE CATEGORY）
+    breadcrumb: Tuple[str, ...]  # Path chain from root to this node
+    child_count: int             # Number of ACTIVE children
+    sibling_count: int           # Number of ACTIVE sibling CATEGORYs
 
     @property
     def path(self) -> str:
-        """节点完整路径。"""
+        """Get the full path of this node."""
         return self.node.path
 
     @property
     def is_category(self) -> bool:
-        """是否为目录节点。"""
-
+        """Check if this is a CATEGORY (directory) node."""
         return self.node.node_type == NodeType.CATEGORY
 
     @property
     def summary(self) -> str:
-        """节点摘要：路径 + 内容前 100 字符。"""
+        """
+        Generate a brief summary: path + content preview (100 chars).
+
+        Returns:
+            Formatted string like "[path] content preview...".
+        """
         content_preview = self.node.content[:100]
         suffix = "..." if len(self.node.content) > 100 else ""
         return f"[{self.path}] {content_preview}{suffix}"
@@ -52,29 +98,58 @@ class NodeView:
 @dataclass(frozen=True)
 class TreeView:
     """
-    树形视图：递归展示节点及其子树。
+    Recursive tree view for exploring hierarchical structure.
 
-    适用于：目录浏览、整体结构查看、导出完整知识树。
-    支持深度限制以控制返回数据量。
+    TreeView provides a complete subtree structure suitable for:
+    - Directory browsing and exploration
+    - Exporting the knowledge tree
+    - Understanding overall organization
+
+    The view is depth-limited to prevent performance issues with
+    deeply nested trees.
+
+    Attributes:
+        node: The TreeNode at this level.
+        children: Tuple of TreeViews for each child node.
+        depth: Current depth in the tree (root = 0).
+
+    Properties:
+        path: Shortcut to node.path.
+        total_nodes: Recursive count of all nodes in subtree.
+        leaf_count: Recursive count of LEAF nodes only.
+
+    Example:
+        >>> tree = await semafs.view_tree("root", max_depth=2)
+        >>> print(f"Total: {tree.total_nodes}, Leaves: {tree.leaf_count}")
+        Total: 42, Leaves: 35
     """
-
     node: TreeNode
     children: Tuple["TreeView", ...] = ()
-    depth: int = 0  # 当前节点在树中的深度（root 为 0）
+    depth: int = 0  # Depth in tree (root = 0)
 
     @property
     def path(self) -> str:
+        """Get the path of the root node of this subtree."""
         return self.node.path
 
     @property
     def total_nodes(self) -> int:
-        """递归统计子树中的总节点数（包括自己）。"""
+        """
+        Recursively count all nodes in this subtree.
+
+        Returns:
+            Total node count including this node and all descendants.
+        """
         return 1 + sum(child.total_nodes for child in self.children)
 
     @property
     def leaf_count(self) -> int:
-        """递归统计叶子节点数量。"""
+        """
+        Recursively count LEAF nodes in this subtree.
 
+        Returns:
+            Number of LEAF nodes (excluding CATEGORYs).
+        """
         if self.node.node_type == NodeType.LEAF:
             return 1
         return sum(child.leaf_count for child in self.children)
@@ -83,33 +158,60 @@ class TreeView:
 @dataclass(frozen=True)
 class RelatedNodes:
     """
-    相关节点视图：当前节点的上下文关联节点。
+    Navigation map showing a node's contextual relationships.
 
-    提供"导航地图"，帮助 LLM 快速理解节点周边环境。
+    RelatedNodes provides the "neighborhood" around a node, enabling
+    LLMs to understand context and make navigation suggestions.
+    Think of it as a compass showing what's around the current location.
+
+    This view includes:
+    - Parent: Where this node came from
+    - Siblings: Other nodes at the same level
+    - Children: What's inside (for CATEGORYs)
+    - Ancestors: Full path back to root
+
+    Attributes:
+        current: NodeView of the focal node.
+        parent: NodeView of parent (None for root).
+        siblings: Tuple of sibling NodeViews.
+        children: Tuple of child NodeViews (empty for LEAFs).
+        ancestors: Tuple of ancestor NodeViews (nearest first).
+
+    Properties:
+        navigation_summary: Human-readable summary of relationships.
+
+    Example:
+        >>> related = await semafs.get_related("root.work.projects")
+        >>> print(related.navigation_summary)
+        Current: root.work.projects | Parent: root.work | 3 siblings | 5 children
     """
-
     current: NodeView
     parent: Optional[NodeView] = None
     siblings: Tuple[NodeView, ...] = ()
     children: Tuple[NodeView, ...] = ()
-    ancestors: Tuple[NodeView, ...] = ()  # 从近到远的祖先链
+    ancestors: Tuple[NodeView, ...] = ()  # Nearest to farthest
 
     @property
     def navigation_summary(self) -> str:
-        """导航摘要：当前位置 + 相关节点数量。"""
-        parts = [f"当前: {self.current.path}"]
+        """
+        Generate a human-readable navigation summary.
+
+        Returns:
+            String describing current location and neighbor counts.
+        """
+        parts = [f"Current: {self.current.path}"]
 
         if self.parent:
-            parts.append(f"父级: {self.parent.path}")
+            parts.append(f"Parent: {self.parent.path}")
 
         if self.siblings:
-            parts.append(f"{len(self.siblings)} 个同级节点")
+            parts.append(f"{len(self.siblings)} siblings")
 
         if self.children:
-            parts.append(f"{len(self.children)} 个子节点")
+            parts.append(f"{len(self.children)} children")
 
         if self.ancestors:
-            parts.append(f"祖先链深度: {len(self.ancestors)}")
+            parts.append(f"Ancestor depth: {len(self.ancestors)}")
 
         return " | ".join(parts)
 
@@ -117,25 +219,51 @@ class RelatedNodes:
 @dataclass(frozen=True)
 class StatsView:
     """
-    统计视图：提供知识库的整体统计信息。
+    Statistical overview of the entire knowledge base.
 
-    适用于：LLM 了解记忆库规模、生成报告。
+    StatsView provides high-level metrics about the knowledge tree,
+    useful for:
+    - LLM understanding of scale and structure
+    - Monitoring and reporting
+    - Identifying categories that need attention
+
+    Attributes:
+        total_categories: Count of all CATEGORY nodes.
+        total_leaves: Count of all LEAF nodes.
+        max_depth: Maximum tree depth encountered.
+        dirty_categories: Count of categories awaiting maintenance.
+        top_categories: Sorted list of (path, child_count) tuples.
+
+    Properties:
+        total_nodes: Sum of categories and leaves.
+        summary: Human-readable statistics summary.
+
+    Example:
+        >>> stats = await semafs.stats()
+        >>> print(stats.summary)
+        Total 150 nodes (12 categories, 138 leaves), max depth 4
     """
-
     total_categories: int
     total_leaves: int
     max_depth: int
     dirty_categories: int
-    top_categories: Tuple[Tuple[str, int], ...]  # (路径, 子节点数) 的排序列表
+    top_categories: Tuple[Tuple[str, int], ...]  # (path, child_count) sorted
 
     @property
     def total_nodes(self) -> int:
-        """总节点数。"""
+        """Get total node count (categories + leaves)."""
         return self.total_categories + self.total_leaves
 
     @property
     def summary(self) -> str:
-        """统计摘要。"""
-        return (f"总计 {self.total_nodes} 个节点 "
-                f"({self.total_categories} 个目录, {self.total_leaves} 个叶子), "
-                f"最大深度 {self.max_depth}")
+        """
+        Generate a human-readable statistics summary.
+
+        Returns:
+            Formatted string with key metrics.
+        """
+        return (
+            f"Total {self.total_nodes} nodes "
+            f"({self.total_categories} categories, {self.total_leaves} leaves), "
+            f"max depth {self.max_depth}"
+        )

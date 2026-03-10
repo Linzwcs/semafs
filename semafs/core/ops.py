@@ -1,11 +1,26 @@
 """
-领域层：操作命令（Op）与计划（RebalancePlan）
+Operation commands (Ops) and RebalancePlan for knowledge tree reorganization.
 
-设计原则：
-1. Op 是纯数据载体（frozen dataclass），不包含任何执行逻辑
-2. LLM 的输出被解析成 RebalancePlan，PlanExecutor 负责执行
-3. ids 是操作的对象列表，content/name/path 是 LLM 决定的语义信息
-4. 没有任何一个 Op 知道"怎么做"，只知道"做什么"
+This module defines the command objects that represent reorganization operations.
+These are pure data carriers (frozen dataclasses) with no execution logic.
+
+Design Principles:
+    1. Ops are immutable data containers - they describe WHAT to do, not HOW
+    2. LLM output is parsed into a RebalancePlan, which the Executor processes
+    3. Each Op contains the semantic information decided by the LLM
+    4. The Executor is responsible for applying operations to the tree
+
+Operation Types:
+    - MergeOp: Combine multiple semantically similar leaves into one
+    - GroupOp: Create a new category and move leaves into it
+    - MoveOp: Relocate a single leaf to an existing category
+    - PersistOp: Convert a pending fragment to an active leaf (rule-based)
+
+Usage:
+    plan = RebalancePlan(
+        ops=(MergeOp(ids=("id1", "id2"), content="merged", name="combined"),),
+        updated_content="Category summary after merge",
+    )
 """
 from __future__ import annotations
 
@@ -18,12 +33,32 @@ from .enums import OpType
 @dataclass(frozen=True)
 class MergeOp:
     """
-    合并：将 ids 里的多个叶子归档，创建一个新的合并叶子。
+    Merge operation: Combine multiple leaves into a single new leaf.
 
-    - ids: 至少 2 个叶子节点 ID（LLM 选择的合并对象）
-    - content: LLM 生成的语义浓缩内容（不是原内容的简单拼接）
-    - name: 新叶子的路径名（LLM 生成，英文，下划线分隔）
-    - reasoning: LLM 的决策理由，用于审计日志
+    When LLM determines that several leaves describe different facets of
+    the same topic, it creates a MergeOp to consolidate them. The original
+    leaves are archived, and a new leaf with synthesized content is created.
+
+    Important: The merged content should be a superset of all original details.
+    Specific values, dates, and proper nouns must NOT be lost in the merge.
+
+    Attributes:
+        ids: Tuple of at least 2 leaf node IDs to merge.
+        content: LLM-generated synthesized content (not simple concatenation).
+        name: System name for the new leaf (lowercase, underscores, a-z0-9_).
+        reasoning: LLM's explanation for why this merge makes sense.
+        op_type: Always OpType.MERGE (auto-set, not passed to __init__).
+
+    Raises:
+        ValueError: If fewer than 2 IDs are provided.
+
+    Example:
+        >>> MergeOp(
+        ...     ids=("abc123", "def456"),
+        ...     content="User prefers black coffee, specifically Americano without sugar",
+        ...     name="coffee_preferences",
+        ...     reasoning="Both fragments describe coffee drinking habits"
+        ... )
     """
     ids: Tuple[str, ...]
     content: str
@@ -33,17 +68,37 @@ class MergeOp:
 
     def __post_init__(self) -> None:
         if len(self.ids) < 2:
-            raise ValueError(f"MergeOp 至少需要 2 个节点 ID，收到 {len(self.ids)} 个")
+            raise ValueError(
+                f"MergeOp requires at least 2 node IDs, got {len(self.ids)}"
+            )
 
 
 @dataclass(frozen=True)
 class GroupOp:
     """
-    分组：将 ids 里的叶子归入一个新建的子 CATEGORY。
+    Group operation: Create a new category and move leaves into it.
 
-    - ids: 至少 2 个叶子节点 ID（构成新子目录的内容）
-    - name: 新 CATEGORY 的路径名（LLM 生成）
-    - content: 新 CATEGORY 的摘要（LLM 从 ids 内容语义浓缩）
+    When LLM identifies leaves that belong to the same broad topic but are
+    distinct entities, it creates a GroupOp to organize them under a new
+    subcategory. Original leaves are archived and recreated under the new category.
+
+    Attributes:
+        ids: Tuple of at least 2 leaf node IDs to group together.
+        name: System name for the new category (lowercase, underscores).
+        content: Summary/description for the new category (LLM-generated).
+        reasoning: LLM's explanation for this grouping decision.
+        op_type: Always OpType.GROUP (auto-set).
+
+    Raises:
+        ValueError: If fewer than 2 IDs or empty name provided.
+
+    Example:
+        >>> GroupOp(
+        ...     ids=("id1", "id2", "id3"),
+        ...     name="backend_specs",
+        ...     content="Technical specifications for backend development",
+        ...     reasoning="All three fragments relate to backend architecture"
+        ... )
     """
     ids: Tuple[str, ...]
     name: str
@@ -53,19 +108,39 @@ class GroupOp:
 
     def __post_init__(self) -> None:
         if len(self.ids) < 2:
-            raise ValueError(f"GroupOp 至少需要 2 个节点 ID，收到 {len(self.ids)} 个")
+            raise ValueError(
+                f"GroupOp requires at least 2 node IDs, got {len(self.ids)}"
+            )
         if not self.name:
-            raise ValueError("GroupOp 必须提供新 CATEGORY 的 name")
+            raise ValueError("GroupOp must have a name for the new category")
 
 
 @dataclass(frozen=True)
 class MoveOp:
     """
-    移动：将单个叶子移入已存在的目标 CATEGORY。
+    Move operation: Relocate a single leaf to an existing category.
 
-    - ids: 恰好 1 个叶子节点 ID
-    - path_to_move: 目标 CATEGORY 的完整路径（必须已存在，不能自动创建）
-    - name: 移入后叶子的路径名（LLM 生成）
+    When a leaf clearly belongs in an existing subcategory, LLM creates a
+    MoveOp. The target path must exist and be a CATEGORY - the operation
+    will be skipped if the target doesn't exist (to prevent path fabrication).
+
+    Attributes:
+        ids: Tuple containing exactly 1 leaf node ID.
+        path_to_move: Complete path to the target category (must exist).
+        name: New name for the leaf after moving.
+        reasoning: LLM's explanation for this move decision.
+        op_type: Always OpType.MOVE (auto-set).
+
+    Raises:
+        ValueError: If not exactly 1 ID or empty path_to_move.
+
+    Example:
+        >>> MoveOp(
+        ...     ids=("abc123",),
+        ...     path_to_move="root.work.projects",
+        ...     name="frontend_refactor",
+        ...     reasoning="This fragment belongs in the projects category"
+        ... )
     """
     ids: Tuple[str, ...]
     path_to_move: str
@@ -75,46 +150,88 @@ class MoveOp:
 
     def __post_init__(self) -> None:
         if len(self.ids) != 1:
-            raise ValueError(f"MoveOp 只能移动 1 个节点，收到 {len(self.ids)} 个")
+            raise ValueError(
+                f"MoveOp must move exactly 1 node, got {len(self.ids)}"
+            )
         if not self.path_to_move:
-            raise ValueError("MoveOp 必须提供 path_to_move")
+            raise ValueError("MoveOp must specify path_to_move")
 
 
 @dataclass(frozen=True)
 class PersistOp:
     """
-    持久化：规则策略专用，将 PENDING_REVIEW 碎片直接转为 ACTIVE 叶子。
-    不涉及 LLM，不需要 content/name 的语义决策。
+    Persist operation: Convert a pending fragment to an active leaf.
+
+    This operation is used by the rule-based strategy (no LLM) to simply
+    promote PENDING_REVIEW fragments to ACTIVE leaves without semantic
+    reorganization. It preserves the original content and metadata.
+
+    Attributes:
+        ids: Tuple containing exactly 1 fragment node ID.
+        name: Name for the persisted leaf.
+        content: Content for the leaf (usually same as fragment).
+        payload: Metadata dict to attach to the leaf.
+        reasoning: Always "Rule strategy: archive inbox fragment".
+        op_type: Always OpType.PERSIST (auto-set).
+
+    Raises:
+        ValueError: If not exactly 1 ID provided.
+
+    Example:
+        >>> PersistOp(
+        ...     ids=("frag_abc",),
+        ...     name="leaf_abc12345",
+        ...     content="User mentioned they like hiking",
+        ...     payload={"_created_at": "2024-01-01T00:00:00"}
+        ... )
     """
     ids: Tuple[str, ...]
     name: str
     content: str
     payload: dict
-    reasoning: str = "规则策略：归档 inbox 碎片"
+    reasoning: str = "Rule strategy: archive inbox fragment"
     op_type: OpType = field(default=OpType.PERSIST, init=False)
 
     def __post_init__(self) -> None:
         if len(self.ids) != 1:
-            raise ValueError("PersistOp 一次只处理 1 个节点")
+            raise ValueError("PersistOp handles exactly 1 node at a time")
 
 
+# Union type for any operation
 AnyOp = Union[MergeOp, GroupOp, MoveOp, PersistOp]
 
 
 @dataclass(frozen=True)
 class RebalancePlan:
     """
-    LLM 大脑深思熟虑后输出的整理计划书。
+    A reorganization plan produced by Strategy for Executor to apply.
 
-    - ops: 有序操作列表，PlanExecutor 按序执行
-    - updated_content: 执行完毕后目录的新摘要（LLM 语义浓缩）
-    - updated_name: 目录的新展示名（可选，LLM 认为有必要时才提供）
-    - overall_reasoning: LLM 整体决策理由
-    - is_llm_plan: True 表示来自 LLM，False 表示规则策略降级
-    - should_parent_be_dirty: 是否需要将父目录标记为 dirty，默认 True
+    RebalancePlan is the output of LLM's deliberation on how to reorganize
+    a category's contents. It contains an ordered list of operations and
+    metadata about the category's new state after execution.
 
-    空计划（ops=[]）合法：表示 LLM 认为当前目录不需要整理，
-    但仍需更新 updated_content（目录摘要可能需要刷新）。
+    An empty ops list is valid - it means LLM determined the current
+    structure is healthy, but updated_content may still need refreshing.
+
+    Attributes:
+        ops: Ordered tuple of operations to execute sequentially.
+        updated_content: New summary for the category after all ops complete.
+        updated_name: New display name for category (optional, LLM decides).
+        overall_reasoning: LLM's explanation of the reorganization strategy.
+        should_dirty_parent: Whether to mark parent as dirty for cascade update.
+        is_llm_plan: True if generated by LLM, False if rule-based fallback.
+
+    Properties:
+        is_empty: True if no structural changes (ops list empty).
+        ops_summary: Human-readable summary of operations for logging.
+
+    Example:
+        >>> plan = RebalancePlan(
+        ...     ops=(merge_op, group_op),
+        ...     updated_content="Category now contains organized knowledge",
+        ...     overall_reasoning="Consolidated duplicates and grouped related items",
+        ...     should_dirty_parent=True
+        ... )
     """
     ops: Tuple[AnyOp, ...]
     updated_content: str
@@ -125,13 +242,19 @@ class RebalancePlan:
 
     @property
     def is_empty(self) -> bool:
-        """没有结构变更，只更新摘要。"""
+        """Check if plan has no structural changes (summary-only update)."""
         return len(self.ops) == 0
 
     @property
     def ops_summary(self) -> str:
+        """
+        Generate a human-readable summary of operations.
+
+        Returns:
+            String like "MERGE×2 | GROUP×1" or "(summary update only)".
+        """
         if self.is_empty:
-            return "(仅更新摘要)"
+            return "(summary update only)"
         counts: dict[str, int] = {}
         for op in self.ops:
             k = op.op_type.value
@@ -142,44 +265,63 @@ class RebalancePlan:
 @dataclass(frozen=True)
 class UpdateContext:
     """
-    整理上下文：PlanExecutor 和 Strategy 所需的全部信息快照。
+    Read-only snapshot of category state for Strategy and Executor.
 
-    这是一个只读的数据快照，在事务开始时一次性获取，
-    后续操作基于此快照推演，避免在执行中途读库产生的不一致。
+    UpdateContext captures all information needed to make reorganization
+    decisions at a specific point in time. It's created at the start of
+    maintenance and used throughout the process, ensuring consistency
+    even if the database changes during execution.
 
-    新增上下文信息：
-    - sibling_categories: parent 的同级 CATEGORY 节点，用于避免重命名冲突
-    - ancestor_categories: 从 parent 到 root 的祖先 CATEGORY 链，提供层级语义理解
+    The context includes:
+    - The parent category being maintained
+    - Its active and pending children
+    - Sibling categories (to avoid naming conflicts)
+    - Ancestor chain (to provide hierarchical semantic context)
+
+    Attributes:
+        parent: The CATEGORY node being maintained.
+        active_nodes: Tuple of ACTIVE children (stable, organized nodes).
+        pending_nodes: Tuple of PENDING_REVIEW children (new fragments).
+        sibling_categories: Tuple of parent's sibling CATEGORYs (for naming).
+        ancestor_categories: Tuple of ancestors from parent to root (near→far).
+
+    Properties:
+        inbox: Alias for pending_nodes (semantic clarity).
+        children: Alias for active_nodes (semantic clarity).
+        all_nodes: Combined tuple of active and pending nodes.
+        sibling_category_names: Quick access to sibling names as strings.
+        ancestor_path_chain: Full path chain from root to parent.
     """
-    from .node import TreeNode  # 避免循环导入，延迟引入
+    from .node import TreeNode  # Deferred import to avoid circular dependency
 
     parent: "TreeNode"
-    active_nodes: Tuple["TreeNode", ...]  # 已整理的稳定节点
-    pending_nodes: Tuple["TreeNode", ...]  # 刚写入的碎片（PENDING_REVIEW）
-    sibling_categories: Tuple["TreeNode", ...] = ()  # parent 同级 CATEGORY（不含自身）
-    ancestor_categories: Tuple["TreeNode", ...] = ()  # 祖先 CATEGORY 链（从近到远）
+    active_nodes: Tuple["TreeNode", ...]  # Organized, stable nodes
+    pending_nodes: Tuple["TreeNode", ...]  # New fragments (PENDING_REVIEW)
+    sibling_categories: Tuple["TreeNode", ...] = ()  # Parent's siblings
+    ancestor_categories: Tuple["TreeNode", ...] = ()  # Ancestor chain (near→far)
 
     @property
     def inbox(self) -> Tuple["TreeNode", ...]:
-        """pending_nodes 的语义别名。"""
+        """Semantic alias for pending_nodes (fragments awaiting organization)."""
         return self.pending_nodes
 
     @property
     def children(self) -> Tuple["TreeNode", ...]:
-        """active_nodes 的语义别名。"""
+        """Semantic alias for active_nodes (organized children)."""
         return self.active_nodes
 
     @property
     def all_nodes(self) -> Tuple["TreeNode", ...]:
+        """Combined tuple of all nodes (active + pending)."""
         return self.active_nodes + self.pending_nodes
 
     @property
     def sibling_category_names(self) -> Tuple[str, ...]:
-        """同级分类名称集合，用于快速检查命名冲突。"""
+        """Tuple of sibling category names for quick conflict checking."""
         return tuple(s.name for s in self.sibling_categories)
 
     @property
     def ancestor_path_chain(self) -> Tuple[str, ...]:
-        """从 root 到 parent 的完整路径链（从远到近）。"""
+        """Full path chain from root to parent (far→near order)."""
         return tuple(reversed([a.path for a in self.ancestor_categories
                                ])) + (self.parent.path, )

@@ -1,3 +1,28 @@
+"""
+LLM adapter base class and prompt building utilities.
+
+This module provides:
+- BaseLLMAdapter: Abstract base class for LLM API integrations
+- Prompt construction utilities for the tree reorganization task
+- Tool schema definition for LLM function calling
+
+The LLM adapter abstracts away the differences between LLM providers
+(OpenAI, Anthropic, etc.) while providing a consistent interface for
+the Strategy layer.
+
+Prompt Structure:
+    - System prompt: Role definition, operation guidelines, formatting rules
+    - User prompt: Current directory state, available operations, constraints
+
+Implementations:
+- OpenAIAdapter: Uses OpenAI's chat completions with function calling
+- AnthropicAdapter: Uses Anthropic's messages API with tool use
+
+Usage:
+    adapter = OpenAIAdapter(client, model="gpt-4o")
+    result = await adapter.call(context, max_children=10)
+    # result contains parsed ops, reasoning, updated_content, etc.
+"""
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple
@@ -5,10 +30,12 @@ from ..core.ops import UpdateContext
 from ..core.exceptions import LLMAdapterError
 from ..core.enums import NodeType
 
-# ── Tool Schema（Anthropic 格式，OpenAI 适配器会转换）──────────
+# Tool schema for LLM function calling (Anthropic format)
+# OpenAI adapter converts this to OpenAI's function schema format
 _TREE_OPS_SCHEMA = {
     "name": "tree_ops",
-    "description": "决定如何整理目录中的记忆碎片。通过执行 merge/group/move 维持目录整洁。",
+    "description": "Decide how to reorganize memory fragments in a directory. "
+    "Maintain directory cleanliness through merge/group/move operations.",
     "input_schema": {
         "type":
         "object",
@@ -17,14 +44,16 @@ _TREE_OPS_SCHEMA = {
         "properties": {
             "ops": {
                 "type": "array",
-                "description": "操作列表。如果无需改变目录结构（未满载且无需聚类），返回空数组 []",
+                "description":
+                "List of operations. Return empty array [] if structure is healthy.",
                 "items": {
                     "type": "object",
                     "required": ["op_type", "ids", "reasoning", "name"],
                     "properties": {
                         "op_type": {
                             "type": "string",
-                            "enum": ["MERGE", "GROUP", "MOVE"]
+                            "enum": ["MERGE", "GROUP", "MOVE"],
+                            "description": "Type of operation to perform"
                         },
                         "ids": {
                             "type":
@@ -33,92 +62,134 @@ _TREE_OPS_SCHEMA = {
                                 "type": "string"
                             },
                             "description":
-                            "MERGE至少2个LEAF ID；GROUP至少2个LEAF ID；MOVE仅限1个LEAF ID, id来自 [id: xxx] 中的 xxx",
+                            "MERGE: 2+ LEAF IDs; GROUP: 2+ LEAF IDs; MOVE: exactly 1 LEAF ID. "
+                            "IDs come from [id: xxx] in the node list."
                         },
                         "reasoning": {
                             "type": "string",
-                            "description": "简要说明为什么执行此操作（中文）"
+                            "description":
+                            "Brief explanation for this operation"
                         },
                         "name": {
                             "type":
                             "string",
                             "description":
-                            "生成的节点系统名称。必须全小写英文，单词间用下划线连接(如 java_backend_specs)。勿用中文或特殊符号！",
+                            "System name for the resulting node. Must be lowercase English, "
+                            "words separated by underscores (e.g., java_backend_specs). "
+                            "No Chinese or special characters allowed!"
                         },
                         "content": {
                             "type":
                             "string",
                             "description":
-                            "仅 MERGE 和 GROUP 需要。MERGE: 原文细节的无损拼接或归纳（务必保留数值/专有名词）；GROUP: 新分类的主题概述。",
+                            "Only for MERGE and GROUP. MERGE: lossless synthesis of original "
+                            "content (preserve all specifics); GROUP: topic summary."
                         },
                         "path_to_move": {
                             "type":
                             "string",
                             "description":
-                            "仅 MOVE 需要。目标分类的完整路径（必须从 <available_move_targets> 中精确复制）。",
+                            "Only for MOVE. Target category's full path "
+                            "(must copy exactly from available_move_targets)."
                         },
                     },
                 },
             },
             "overall_reasoning": {
                 "type": "string",
-                "description": "描述整体的整理策略和思考过程（中文）"
+                "description": "Describe the overall reorganization strategy"
             },
             "updated_content": {
-                "type": "string",
-                "description": "当前目录在执行完上述 ops 后的全局最新摘要。用于被上级目录读取。",
+                "type":
+                "string",
+                "description":
+                "Updated summary for this directory after executing all ops. "
+                "Will be read by parent directory."
             },
             "updated_name": {
-                "type": "string",
-                "description": "当前目录的新展示名（中文，可选）。仅在原名称不再适合当前内容时更新。",
+                "type":
+                "string",
+                "description":
+                "New display name for this directory (optional). "
+                "Only update if current name no longer fits the content."
             },
             "should_dirty_parent": {
-                "type": "boolean",
-                "description": "如果你在此次整理中得出了影响上级目录的重大新结论，设为 true 以触发语义上浮。"
+                "type":
+                "boolean",
+                "description":
+                "Set to true if this reorganization produced major new insights "
+                "that should propagate to parent directory."
             }
         },
     },
 }
-# ── Prompt 构建 ────────────────────────────────────────────────
 
 
 def _format_node_list(nodes: list) -> str:
+    """
+    Format a list of nodes for inclusion in the LLM prompt.
 
+    Each node is formatted with its short ID, type, name, and content preview.
+
+    Args:
+        nodes: List of TreeNode objects.
+
+    Returns:
+        Formatted string with one node per line, or "(empty)" if no nodes.
+    """
     if not nodes:
-        return "  (空)"
+        return "  (empty)"
     lines = []
     for n in nodes:
-        lines.append(
-            f"  - [id: {n.id[:8]}] node_type: {n.node_type.value} | name: {n.name}(not id) | content: {n.content}..."
-        )
-    return "\n".join(lines)
+        lines.append(f"  - [id: {n.id[:8]}] node_type: {n.node_type.value} | "
+                     f"name: {n.name}(not id) | content: {n.content}...")
+    return "\n".join(
+        lines
+    ) + "\n\n" + "Note: the id is used to identify the node, do not use the name to identify the node."
 
 
 def _build_prompt(
     context: UpdateContext,
     max_children: int,
 ) -> Tuple[str, str]:
+    """
+    Build system and user prompts for the LLM reorganization task.
 
+    Constructs a rich context including:
+    - Current directory state and capacity
+    - Active and pending nodes
+    - Available move targets (existing subcategories)
+    - Sibling categories (for naming conflict avoidance)
+    - Ancestor hierarchy (for semantic context)
+
+    Args:
+        context: The UpdateContext snapshot.
+        max_children: Maximum allowed children in a category.
+
+    Returns:
+        Tuple of (system_prompt, user_prompt) strings.
+    """
     all_nodes = list(context.active_nodes) + list(context.pending_nodes)
     total_count = len(all_nodes)
 
+    # Find available move targets (existing subcategories)
     sub_cats = [
         n for n in context.active_nodes if n.node_type == NodeType.CATEGORY
     ]
     available_paths = "\n".join([f"  * {c.path}"
-                                 for c in sub_cats]) or "  (当前无子分类)"
+                                 for c in sub_cats]) or "  (no subcategories)"
 
-    # 构建同级分类信息（用于避免命名冲突）
+    # Build sibling info for naming conflict avoidance
     sibling_info = ""
     if context.sibling_categories:
         sibling_names = [f"'{s.name}'" for s in context.sibling_categories]
         sibling_info = f"""
 <sibling_categories>
-当前目录的同级分类名称（更新 updated_name 时需避免与它们冲突）：
+Sibling category names at the same level (avoid conflicts when updating updated_name):
   {', '.join(sibling_names)}
 </sibling_categories>"""
 
-    # 构建祖先层级信息（提供语义上下文）
+    # Build ancestor hierarchy for semantic context
     ancestor_info = ""
     if context.ancestor_categories:
         ancestor_chain = []
@@ -129,45 +200,55 @@ def _build_prompt(
             ancestor_chain.append(f"{indent}└─ {anc.path}: {summary}")
         ancestor_info = f"""
 <hierarchical_context>
-当前目录在知识树中的位置（从根到当前的父路径）：
+Position in the knowledge tree (from root to current):
 {''.join(ancestor_chain)}
-  {"  " * len(context.ancestor_categories)}└─ {context.parent.path} (当前目录)
+  {"  " * len(context.ancestor_categories)}└─ {context.parent.path} (current directory)
 
-理解这个层级有助于你：
-1. 判断当前目录的语义边界（避免创建与上级重复的分类）
-2. 决定是否应该 should_dirty_parent=true（内容有重大变化时向上传播）
-3. 为新建的 GROUP 选择合适的抽象层级
+Understanding this hierarchy helps you:
+1. Determine semantic boundaries (avoid creating categories that duplicate parent)
+2. Decide whether should_dirty_parent=true (propagate major changes upward)
+3. Choose appropriate abstraction level for new GROUP categories
 </hierarchical_context>"""
 
-    # 强化版的 System Prompt
-    system_prompt = f"""你是一个运行在 SemaFS (语义文件系统) 底层的知识图谱调度引擎。
-你的核心职责是：在保证【节点数不超过 {max_children} 个】的前提下，对当前的记忆碎片进行语义聚类和信息降维。
+    # System prompt with operation guidelines
+    system_prompt = f"""You are a knowledge graph scheduling engine running inside SemaFS (Semantic File System).
+Your core responsibility: Semantically cluster and reduce information while keeping node count under {max_children}.
 
-【核心算子 (Ops) 决策指南】
-请严格根据以下场景选择操作：
-1. 🟩 MERGE (合并叶子)：当几个节点描述的是【同一具体事物/习惯的不同侧面】（例："喜欢喝美式"与"喝咖啡不加糖"）。
-   - ⚠️ 致命红线：MERGE 生成的 content 必须是所有原节点细节的「超集」。绝不允许丢失具体数值、时间、专有名词！可以将内容分段拼接，但不能用抽象废话替代具体细节。
-2. 🗂️ GROUP (新建分类)：当几个节点属于【同一个宽泛主题】但互为独立实体（例："前端框架规范"与"后端DB规范"）。
-   - 将它们移入新创建的 CATEGORY 中。新 content 是对该主题的精简摘要。
-   - 创建 GROUP 时，请参考层级上下文，确保新分类的抽象级别合适（不与父级或祖先重复）
-3. ➡️ MOVE (移动到现有)：当某个节点完全符合下方列出的「可用子分类」时使用。
-   - ⚠️ 致命红线：path_to_move 必须一字不差地从可用列表中复制，绝不可凭空捏造路径！
+【Operation Decision Guide】
+Choose operations based on these scenarios:
+1. 🟩 MERGE (combine leaves): When nodes describe DIFFERENT ASPECTS OF THE SAME THING
+   (e.g., "likes Americano" and "drinks coffee without sugar").
+   - ⚠️ CRITICAL: MERGE content must be a SUPERSET of all original details.
+     Never lose specific values, dates, or proper nouns! You may concatenate with sections.
+2. 🗂️ GROUP (create category): When nodes belong to the SAME BROAD TOPIC but are independent entities
+   (e.g., "frontend framework specs" and "backend DB specs").
+   - Move them into a newly created CATEGORY. The content is a concise topic summary.
+   - When creating GROUP, check hierarchical context to ensure appropriate abstraction level.
+3. ➡️ MOVE (to existing): When a node perfectly fits an available subcategory below.
+   - ⚠️ CRITICAL: path_to_move must be copied EXACTLY from the available list!
 
-【命名与格式红线】
-- `name` 字段：必须作为有效的文件路径节点，尽可能一个单词表示，多个单词用下划线连接。仅限使用小写英文、数字和下划线 (a-z, 0-9, _)，不超过 32 字符。例如: coffee_prefs, morning_routine。绝对禁止中文、大写或空格。
-- `updated_name` 字段：如果要更新当前目录的名称，请确保不与同级分类名称冲突（见下方 sibling_categories）
+【Naming and Formatting Rules】
+- `name` field: Must be a valid path segment. Prefer single words; use underscores for multiple words.
+  Only lowercase letters, numbers, underscores (a-z, 0-9, _). Max 32 chars.
+  Example: coffee_prefs, morning_routine. NO Chinese, uppercase, or spaces.
+- `updated_name` field: Ensure no conflict with sibling category names (see sibling_categories).
 
-【目录状态刷新】
-- `updated_content`：你必须基于执行操作后的剩余节点和新节点，重新撰写当前目录的完整摘要。
-- `should_dirty_parent`：如果本次整理提取出了全新的重要主题，或者改变了该目录的核心性质，设为 true 以触发级联更新。"""
+【Directory State Refresh】
+- `updated_content`: Rewrite the directory's complete summary based on remaining + new nodes.
+- `should_dirty_parent`: Set true if this reorganization extracted new major themes or changed core nature."""
 
+    # Build status warning based on capacity
     status_warning = ""
     if total_count > max_children:
-        status_warning = f"🔴 严重警告：当前总节点数({total_count})已超出硬性上限({max_children})，你必须至少执行一次 MERGE 或 GROUP 操作来减少平行节点数量！"
+        status_warning = (
+            f"🔴 CRITICAL: Node count ({total_count}) exceeds limit ({max_children}). "
+            f"You MUST perform MERGE or GROUP to reduce parallel nodes!")
     elif context.pending_nodes:
-        status_warning = f"🟡 提示：有新碎片进入。如果总数逼近上限，请主动整理以保持目录清爽。"
+        status_warning = (
+            f"🟡 NOTE: New fragments arrived. Consider proactive organization "
+            f"if approaching capacity.")
 
-    # 将内容呈现的结构更加清晰化
+    # User prompt with full context
     user_content = f"""<directory_status>
 - current_path: "{context.parent.path}"
 - current_name: "{context.parent.display_name or context.parent.name}"
@@ -176,7 +257,7 @@ def _build_prompt(
 </directory_status>
 
 <current_directory_summary>
-{context.parent.content or '(空)'}
+{context.parent.content or '(empty)'}
 </current_directory_summary>
 {sibling_info}
 {ancestor_info}
@@ -192,23 +273,73 @@ def _build_prompt(
 {_format_node_list(list(context.pending_nodes))}
 </new_pending_fragments>
 
-请综合以上信息，调用 `tree_ops` 输出你的重构计划。如果当前结构很健康且未超载，可以返回空的 ops 数组，但必须更新 updated_content。"""
+Please call `tree_ops` with your reorganization plan. If structure is healthy and under capacity, return empty ops array but always update updated_content."""
 
     return (system_prompt, user_content)
 
 
 class BaseLLMAdapter(ABC):
-    """所有 LLM 适配器的基类，封装 prompt 构建和结果解析。"""
+    """
+    Abstract base class for LLM API adapters.
+
+    BaseLLMAdapter handles prompt construction and error wrapping,
+    while subclasses implement the actual API calls. This enables
+    consistent behavior across different LLM providers.
+
+    Subclass Requirements:
+        - Implement _call_api() to make the actual LLM API call
+        - Parse the response and return the tree_ops tool input dict
+        - Handle provider-specific response formats
+
+    Error Handling:
+        All exceptions from _call_api are wrapped in LLMAdapterError
+        by the call() method for consistent error handling in Strategy.
+    """
 
     @abstractmethod
     async def _call_api(self, system: str, user: str) -> Dict:
-        """调用具体 LLM API，返回 tree_ops 的 input dict。"""
+        """
+        Make the actual LLM API call.
+
+        Subclasses implement this to call their specific LLM provider.
+        The response should be the parsed tree_ops tool input dict.
+
+        Args:
+            system: The system prompt string.
+            user: The user prompt string.
+
+        Returns:
+            Dict containing ops, overall_reasoning, updated_content, etc.
+
+        Raises:
+            LLMAdapterError: If the API call fails or response is invalid.
+        """
         ...
 
     async def call(self, context: UpdateContext, max_children: int) -> Dict:
+        """
+        Generate a reorganization plan using the LLM.
 
+        Builds prompts from context and calls the LLM API. All exceptions
+        are wrapped in LLMAdapterError for consistent error handling.
+
+        Args:
+            context: The UpdateContext snapshot for the category.
+            max_children: Maximum allowed children in a category.
+
+        Returns:
+            Dict containing the LLM's reorganization decision:
+            - ops: List of operation dicts
+            - overall_reasoning: Explanation string
+            - updated_content: New category summary
+            - updated_name: Optional new display name
+            - should_dirty_parent: Boolean flag
+
+        Raises:
+            LLMAdapterError: If the LLM call fails for any reason.
+        """
         system, user = _build_prompt(context, max_children)
         try:
             return await self._call_api(system, user)
         except Exception as e:
-            raise LLMAdapterError(f"LLM API 调用失败: {e}") from e
+            raise LLMAdapterError(f"LLM API call failed: {e}") from e

@@ -1,10 +1,26 @@
 """
-渲染器协议：定义视图对象到不同格式的转换接口。
+Renderer protocol: Interface for converting views to output formats.
 
-设计原则：
-1. 协议优先：定义接口而非实现
-2. 单一职责：每个渲染器只负责一种格式
-3. 无状态：所有方法都是纯函数
+This module defines the Renderer protocol that all view renderers must
+implement. Renderers convert immutable View objects into formatted strings
+suitable for different output targets.
+
+Design Principles:
+    1. Protocol-first: Define interface, not implementation
+    2. Single responsibility: Each renderer handles one format
+    3. Stateless: All methods are pure functions (static methods)
+    4. Views are data, renderers handle presentation
+
+Implementations:
+    - TextRenderer: Terminal-friendly tree output with box characters
+    - MarkdownRenderer: Export to Markdown documents
+    - LLMRenderer: Minimal format optimized for LLM context (low token cost)
+    - JSONRenderer: Structured data for API responses
+
+Usage:
+    tree_view = await semafs.view_tree("root")
+    text_output = TextRenderer.render_tree(tree_view)
+    markdown_output = MarkdownRenderer.render_tree(tree_view)
 """
 from __future__ import annotations
 
@@ -16,28 +32,71 @@ from ..core.views import NodeView, TreeView, RelatedNodes, StatsView
 @runtime_checkable
 class Renderer(Protocol):
     """
-    渲染器协议。
+    Protocol for view-to-string rendering.
 
-    所有渲染器都应该实现这个协议，提供统一的渲染接口。
-    实现可以选择性地实现部分方法（返回 NotImplementedError）。
+    All renderers implement this protocol to provide consistent
+    rendering interfaces across different output formats.
+
+    Implementation Notes:
+        - All methods are static (no instance state needed)
+        - Methods may raise NotImplementedError if not applicable
+        - Renderers should handle edge cases (empty content, etc.)
+
+    Method Signatures:
+        - render_node: Single node with context
+        - render_tree: Recursive tree structure
+        - render_related: Navigation map
+        - render_stats: Knowledge base statistics
     """
 
     @staticmethod
     def render_node(view: NodeView) -> str:
-        """渲染单个节点视图。"""
+        """
+        Render a single node view to string.
+
+        Args:
+            view: NodeView containing node and context.
+
+        Returns:
+            Formatted string representation of the node.
+        """
         ...
 
     @staticmethod
     def render_tree(view: TreeView) -> str:
-        """渲染树形视图。"""
+        """
+        Render a tree view to string.
+
+        Args:
+            view: TreeView containing recursive tree structure.
+
+        Returns:
+            Formatted string showing the tree hierarchy.
+        """
         ...
 
     @staticmethod
     def render_related(related: RelatedNodes) -> str:
-        """渲染相关节点。"""
+        """
+        Render a related nodes navigation map to string.
+
+        Args:
+            related: RelatedNodes containing navigation context.
+
+        Returns:
+            Formatted string showing related nodes.
+        """
         ...
 
     @staticmethod
     def render_stats(stats: StatsView) -> str:
-        """渲染统计信息。"""
+        """
+        Render statistics view to string.
+
+        Args:
+            stats: StatsView containing knowledge base metrics.
+
+        Returns:
+            Formatted string showing statistics.
+        """
         ...

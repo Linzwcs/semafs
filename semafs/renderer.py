@@ -1,3 +1,27 @@
+"""
+Renderer implementations: Convert views to various output formats.
+
+This module provides concrete implementations of the Renderer protocol,
+each optimized for a specific output target:
+
+- TextRenderer: Terminal output with tree visualization
+- MarkdownRenderer: Document export with proper headings
+- LLMRenderer: Minimal format for LLM context (lowest token cost)
+- JSONRenderer: Structured data for API responses
+
+Design Philosophy:
+    Data is data, presentation is presentation - never mix them.
+    Views contain only data; Renderers handle all formatting.
+
+Usage:
+    from semafs.renderer import TextRenderer, MarkdownRenderer
+
+    tree_view = await semafs.view_tree("root")
+    print(TextRenderer.render_tree(tree_view))
+
+    with open("export.md", "w") as f:
+        f.write(MarkdownRenderer.render_tree(tree_view))
+"""
 from __future__ import annotations
 
 import json
@@ -8,22 +32,42 @@ from .ports.renderer import Renderer
 
 
 class TextRenderer(Renderer):
+    """
+    Terminal-friendly text renderer.
+
+    Produces human-readable output with tree visualization using
+    box-drawing characters (├── └── │).
+
+    Best for:
+    - CLI output
+    - Debug logging
+    - Quick inspection
+    """
 
     @staticmethod
     def render_node(view: NodeView, show_breadcrumb: bool = True) -> str:
-        """渲染单个节点视图。"""
+        """
+        Render a single node view to text.
+
+        Args:
+            view: The NodeView to render.
+            show_breadcrumb: Whether to show the path breadcrumb.
+
+        Returns:
+            Formatted text representation.
+        """
         lines = []
 
         if show_breadcrumb:
-            lines.append(f"路径: {' > '.join(view.breadcrumb)}")
+            lines.append(f"Path: {' > '.join(view.breadcrumb)}")
 
-        lines.append(f"类型: {'目录' if view.is_category else '叶子'}")
+        lines.append(f"Type: {'Category' if view.is_category else 'Leaf'}")
 
         if view.is_category:
-            lines.append(f"子节点: {view.child_count} 个")
-            lines.append(f"同级节点: {view.sibling_count} 个")
+            lines.append(f"Children: {view.child_count}")
+            lines.append(f"Siblings: {view.sibling_count}")
 
-        lines.append(f"\n内容:\n{view.node.content}")
+        lines.append(f"\nContent:\n{view.node.content}")
 
         return "\n".join(lines)
 
@@ -32,14 +76,22 @@ class TextRenderer(Renderer):
                     indent: str = "  ",
                     show_content: bool = False) -> str:
         """
-        渲染树形结构（类似 `tree` 命令）。
+        Render tree structure with box-drawing characters.
 
-        示例:
+        Example output:
             root
               ├── work (3 items)
               │   ├── projects (5 items)
               │   └── meetings (2 items)
               └── personal (1 item)
+
+        Args:
+            view: The TreeView to render.
+            indent: Base indentation string.
+            show_content: Whether to show content preview for leaves.
+
+        Returns:
+            Formatted tree representation.
         """
         from .core.enums import NodeType
 
@@ -56,6 +108,7 @@ class TextRenderer(Renderer):
             else:
                 lines.append(name)
 
+        # Render children with tree connectors
         for i, child in enumerate(view.children):
             is_last = i == len(view.children) - 1
             prefix = "└── " if is_last else "├── "
@@ -73,24 +126,32 @@ class TextRenderer(Renderer):
 
     @staticmethod
     def render_related(related: RelatedNodes) -> str:
-        """渲染相关节点。"""
-        lines = [related.navigation_summary, "", "详细信息:", ""]
+        """
+        Render related nodes navigation map.
+
+        Args:
+            related: The RelatedNodes to render.
+
+        Returns:
+            Formatted navigation information.
+        """
+        lines = [related.navigation_summary, "", "Details:", ""]
 
         if related.parent:
-            lines.append(f"父级: {related.parent.path}")
+            lines.append(f"Parent: {related.parent.path}")
 
         if related.siblings:
-            lines.append(f"\n同级节点 ({len(related.siblings)}):")
+            lines.append(f"\nSiblings ({len(related.siblings)}):")
             for sib in related.siblings:
                 lines.append(f"  - {sib.path}")
 
         if related.children:
-            lines.append(f"\n子节点 ({len(related.children)}):")
+            lines.append(f"\nChildren ({len(related.children)}):")
             for child in related.children:
                 lines.append(f"  - {child.path}")
 
         if related.ancestors:
-            lines.append(f"\n祖先链:")
+            lines.append(f"\nAncestor chain:")
             for anc in related.ancestors:
                 lines.append(f"  - {anc.path}")
 
@@ -98,52 +159,74 @@ class TextRenderer(Renderer):
 
     @staticmethod
     def render_stats(stats: StatsView) -> str:
-        """渲染统计信息。"""
+        """
+        Render statistics overview.
+
+        Args:
+            stats: The StatsView to render.
+
+        Returns:
+            Formatted statistics.
+        """
         lines = [
-            "知识库统计",
+            "Knowledge Base Statistics",
             "=" * 50,
             stats.summary,
             "",
-            f"待整理目录: {stats.dirty_categories} 个",
+            f"Pending maintenance: {stats.dirty_categories} categories",
             "",
-            "热门目录 (Top 10):",
+            "Top Categories (by child count):",
         ]
 
         for path, count in stats.top_categories:
-            lines.append(f"  {path}: {count} 个子节点")
+            lines.append(f"  {path}: {count} children")
 
         return "\n".join(lines)
 
 
 class MarkdownRenderer(Renderer):
     """
-    Markdown 渲染器：生成 Markdown 格式。
+    Markdown document renderer.
 
-    适用于：文档导出、笔记整理、分享。
-    实现 Renderer 协议。
+    Produces properly formatted Markdown suitable for documentation,
+    note-taking apps, and export.
+
+    Best for:
+    - Document export
+    - Knowledge sharing
+    - Integration with Markdown-based tools
     """
 
     @staticmethod
     def render_node(view: NodeView, heading_level: int = 1) -> str:
-        """渲染单个节点为 Markdown。"""
+        """
+        Render a node as Markdown.
+
+        Args:
+            view: The NodeView to render.
+            heading_level: Heading level (1-6) for the title.
+
+        Returns:
+            Formatted Markdown string.
+        """
         h = "#" * heading_level
         lines = [f"{h} {view.node.display_name or view.node.name}", ""]
 
-        # 面包屑
+        # Breadcrumb navigation
         breadcrumb = " → ".join(view.breadcrumb)
-        lines.append(f"**路径**: {breadcrumb}  ")
+        lines.append(f"**Path**: {breadcrumb}  ")
 
-        # 元信息
+        # Type information
         if view.is_category:
-            lines.append(f"**类型**: 目录 (包含 {view.child_count} 个子节点)  ")
+            lines.append(f"**Type**: Category ({view.child_count} children)  ")
         else:
-            lines.append(f"**类型**: 叶子节点  ")
+            lines.append(f"**Type**: Leaf  ")
 
         lines.append("")
 
-        # 内容
+        # Content section
         if view.node.content:
-            lines.append("## 内容")
+            lines.append("## Content")
             lines.append("")
             lines.append(view.node.content)
 
@@ -151,7 +234,16 @@ class MarkdownRenderer(Renderer):
 
     @staticmethod
     def render_tree(view: TreeView, heading_level: int = 1) -> str:
-        """递归渲染树形结构为 Markdown。"""
+        """
+        Recursively render tree as Markdown with nested headings.
+
+        Args:
+            view: The TreeView to render.
+            heading_level: Starting heading level.
+
+        Returns:
+            Formatted Markdown document.
+        """
         from .core.enums import NodeType
 
         h = "#" * heading_level
@@ -160,7 +252,7 @@ class MarkdownRenderer(Renderer):
 
         if view.node.content:
             lines.append("")
-            # 截断内容避免太长
+            # Truncate long content
             content = view.node.content[:200]
             if len(view.node.content) > 200:
                 content += "..."
@@ -168,7 +260,7 @@ class MarkdownRenderer(Renderer):
 
         lines.append("")
 
-        # 递归渲染子节点
+        # Recursively render children with increased heading level
         for child in view.children:
             child_md = MarkdownRenderer.render_tree(child, heading_level + 1)
             lines.append(child_md)
@@ -178,19 +270,34 @@ class MarkdownRenderer(Renderer):
 
 class LLMRenderer(Renderer):
     """
-    LLM 专用渲染器：生成极简、结构化的格式。
+    Minimalist renderer optimized for LLM consumption.
 
-    设计原则：
-    1. 最小 token 消耗：省略冗余信息
-    2. 结构清晰：使用缩进、分隔符保持可读性
-    3. 语义优先：只保留 LLM 需要的语义信息
+    Produces compact output that minimizes token usage while
+    maintaining semantic clarity. Uses simple tags and minimal
+    formatting.
 
-    实现 Renderer 协议。
+    Design Principles:
+        1. Minimal tokens: No verbose headers or decorations
+        2. Clear structure: Indentation and simple separators
+        3. Semantic clarity: Preserve meaning despite brevity
+
+    Best for:
+    - LLM context windows
+    - API responses to LLMs
+    - Token-constrained scenarios
     """
 
     @staticmethod
     def render_node(view: NodeView) -> str:
-        """极简节点视图（适合 LLM 快速理解）。"""
+        """
+        Render node in minimal LLM-friendly format.
+
+        Args:
+            view: The NodeView to render.
+
+        Returns:
+            Compact representation with [DIR]/[LEAF] tags.
+        """
         type_tag = "[DIR]" if view.is_category else "[LEAF]"
         lines = [f"{type_tag} {view.path}"]
 
@@ -198,7 +305,7 @@ class LLMRenderer(Renderer):
             lines.append(f"  Contains: {view.child_count} items")
 
         if view.node.content:
-            # 只保留前 150 字符
+            # Truncate to 150 chars for minimal token usage
             content = view.node.content[:150].replace("\n", " ")
             if len(view.node.content) > 150:
                 content += "..."
@@ -209,16 +316,22 @@ class LLMRenderer(Renderer):
     @staticmethod
     def render_tree(view: TreeView, max_content_len: int = 80) -> str:
         """
-        极简树形视图。
+        Render tree in compact format.
 
-        格式:
+        Output format:
             root/
               work/ (3)
                 projects/ (5)
-                  - frontend_refactor: 重构前端架构...
-                  - backend_api: 后端API设计...
+                  - frontend_refactor: content preview...
                 meetings/ (2)
               personal/ (1)
+
+        Args:
+            view: The TreeView to render.
+            max_content_len: Maximum content preview length.
+
+        Returns:
+            Compact tree representation.
         """
         from .core.enums import NodeType
 
@@ -243,13 +356,19 @@ class LLMRenderer(Renderer):
     @staticmethod
     def render_related(related: RelatedNodes) -> str:
         """
-        极简相关节点视图。
+        Render navigation in single-line format.
 
-        格式:
+        Output format:
             Current: root.work.projects
             Parent: root.work
             Siblings: meetings, tasks
             Children: frontend, backend
+
+        Args:
+            related: The RelatedNodes to render.
+
+        Returns:
+            Compact navigation summary.
         """
         lines = [f"Current: {related.current.path}"]
 
@@ -271,15 +390,28 @@ class LLMRenderer(Renderer):
 
 class JSONRenderer(Renderer):
     """
-    JSON 渲染器：生成结构化 JSON。
+    JSON renderer for structured data output.
 
-    适用于：API 响应、程序间交互、数据导出。
-    实现 Renderer 协议。
+    Produces properly formatted JSON suitable for API responses
+    and programmatic consumption.
+
+    Best for:
+    - API endpoints
+    - Data export
+    - Integration with other systems
     """
 
     @staticmethod
     def render_node(view: NodeView) -> str:
-        """渲染节点为 JSON。"""
+        """
+        Render node as JSON.
+
+        Args:
+            view: The NodeView to render.
+
+        Returns:
+            Formatted JSON string.
+        """
         data = {
             "path": view.path,
             "type": "category" if view.is_category else "leaf",
@@ -292,7 +424,15 @@ class JSONRenderer(Renderer):
 
     @staticmethod
     def render_tree(view: TreeView) -> str:
-        """递归渲染树为 JSON。"""
+        """
+        Recursively render tree as JSON.
+
+        Args:
+            view: The TreeView to render.
+
+        Returns:
+            Formatted JSON with nested structure.
+        """
 
         def _to_dict(v: TreeView) -> Dict[str, Any]:
             return {
@@ -309,7 +449,15 @@ class JSONRenderer(Renderer):
 
     @staticmethod
     def render_stats(stats: StatsView) -> str:
-        """渲染统计信息为 JSON。"""
+        """
+        Render statistics as JSON.
+
+        Args:
+            stats: The StatsView to render.
+
+        Returns:
+            Formatted JSON with statistics.
+        """
         data = {
             "total_nodes":
             stats.total_nodes,

@@ -1,3 +1,44 @@
+"""
+SemaFS: Main facade for the semantic filesystem.
+
+This module provides the primary API for interacting with the SemaFS
+knowledge tree. It coordinates between the storage layer, strategy layer,
+and executor to provide a clean, high-level interface.
+
+Core Operations:
+    - write(): Add new knowledge fragments to the tree
+    - read(): Get a single node with navigation context
+    - list(): List direct children of a category
+    - view_tree(): Get recursive tree structure
+    - get_related(): Get navigation map around a node
+    - stats(): Get knowledge base statistics
+    - maintain(): Process dirty categories and reorganize
+
+Architecture:
+    SemaFS acts as an application service (facade pattern), coordinating:
+    - UoWFactory: Transaction management and storage access
+    - Strategy: Reorganization decision-making
+    - Executor: Plan execution
+
+Usage:
+    from semafs import SemaFS
+    from semafs.storage.sqlite import SQLiteUoWFactory
+    from semafs.strategies.rule import RuleOnlyStrategy
+
+    factory = SQLiteUoWFactory("knowledge.db")
+    await factory.init()
+
+    semafs = SemaFS(factory, RuleOnlyStrategy())
+
+    # Write a knowledge fragment
+    frag_id = await semafs.write("root.work", "Meeting notes...", {})
+
+    # Process pending fragments
+    await semafs.maintain()
+
+    # Read back
+    view = await semafs.read("root.work")
+"""
 from __future__ import annotations
 import asyncio
 import logging
@@ -13,14 +54,43 @@ from .core.views import (
     RelatedNodes,
     StatsView,
 )
-from .executor import Executor
 from .ports.strategy import Strategy
 from .ports.factory import UoWFactory
+from .executor import Executor
 
 logger = logging.getLogger(__name__)
 
 
 class SemaFS:
+    """
+    Main facade for the semantic filesystem.
+
+    SemaFS provides the primary API for knowledge management operations.
+    It coordinates storage, strategy, and execution to maintain a
+    well-organized knowledge tree.
+
+    The lifecycle is:
+        1. write() - Add fragments (creates PENDING_REVIEW nodes)
+        2. maintain() - Process dirty categories (reorganizes tree)
+        3. read()/list()/view_tree() - Query the organized knowledge
+
+    Attributes:
+        db_name: Identifier for logging (useful in multi-db scenarios).
+
+    Configuration:
+        max_children: Threshold for triggering LLM reorganization.
+
+    Thread Safety:
+        SemaFS uses async/await and is safe for concurrent operations
+        within a single event loop. Transaction isolation is handled
+        by the UoWFactory.
+
+    Example:
+        semafs = SemaFS(factory, strategy, max_children=10)
+        await semafs.write("root.work", "New project idea", {"priority": "high"})
+        await semafs.maintain()
+        tree = await semafs.view_tree("root")
+    """
 
     def __init__(self,
                  uow_factory: UoWFactory,
@@ -28,6 +98,16 @@ class SemaFS:
                  executor: Optional[Executor] = None,
                  max_children: int = 10,
                  db_name: str = "default") -> None:
+        """
+        Initialize SemaFS.
+
+        Args:
+            uow_factory: Factory for creating Unit of Work instances.
+            strategy: Strategy for reorganization decisions.
+            executor: Executor for plan execution (default: new Executor()).
+            max_children: Max children before triggering reorganization.
+            db_name: Identifier for logging purposes.
+        """
         self._uow_factory = uow_factory
         self._strategy = strategy
         self._executor = executor or Executor()
@@ -35,7 +115,24 @@ class SemaFS:
         self.db_name = db_name
 
     async def write(self, path: str, content: str, payload: dict) -> str:
+        """
+        Write a knowledge fragment to the tree.
 
+        Creates a PENDING_REVIEW fragment under the specified category.
+        The parent category is marked dirty, triggering reorganization
+        on the next maintain() call.
+
+        Args:
+            path: Target category path (will be resolved/created).
+            content: Text content of the fragment.
+            payload: Metadata dict (JSON-serializable).
+
+        Returns:
+            The UUID of the created fragment.
+
+        Raises:
+            NodeNotFoundError: If the resolved path is not a category.
+        """
         resolved = await self._resolve_category(path)
         fragment = TreeNode.new_fragment(parent_path=NodePath(resolved),
                                          content=content,
@@ -49,25 +146,29 @@ class SemaFS:
             uow.register_dirty(parent)
             uow.register_new(fragment)
             await uow.commit()
-        logger.info("[%s] 写入碎片 -> '%s' (id=%s)", self.db_name, fragment.path,
-                    fragment.id[:8])
+
+        logger.info("[%s] Wrote fragment -> '%s' (id=%s)", self.db_name,
+                    fragment.path, fragment.id[:8])
         return fragment.id
 
     async def read(self, path: str) -> Optional[NodeView]:
         """
-        获取单个节点的完整视图。
+        Get a single node with navigation context.
+
+        Returns a NodeView containing the node plus contextual information
+        like breadcrumbs, child count, and sibling count.
 
         Args:
-            path: 节点路径
+            path: Full path to the node.
 
         Returns:
-            NodeView 包含节点信息 + 导航上下文，节点不存在时返回 None
+            NodeView if found, None if node doesn't exist.
         """
         node = await self._uow_factory.repo.get_by_path(path)
         if not node:
             return None
 
-        # 并行获取上下文信息
+        # Parallel fetch of context information
         children, siblings, ancestors = await asyncio.gather(
             self._uow_factory.repo.list_children(path,
                                                  statuses=[NodeStatus.ACTIVE]),
@@ -88,14 +189,17 @@ class SemaFS:
                    path: str,
                    include_archived: bool = False) -> List[NodeView]:
         """
-        列出目录下的所有子节点（仅直接子节点，不递归）。
+        List direct children of a category.
+
+        Returns NodeViews for each child, sorted by path. Does not
+        recurse into subcategories.
 
         Args:
-            path: 目录路径
-            include_archived: 是否包含已归档节点
+            path: Category path to list.
+            include_archived: Whether to include ARCHIVED nodes.
 
         Returns:
-            NodeView 列表（按路径排序）
+            List of NodeViews for direct children, sorted by path.
         """
         statuses = [NodeStatus.ACTIVE, NodeStatus.PENDING_REVIEW]
         if include_archived:
@@ -132,14 +236,17 @@ class SemaFS:
                         path: str = "root",
                         max_depth: int = 3) -> Optional[TreeView]:
         """
-        获取树形视图（递归展示子树）。
+        Get recursive tree structure.
+
+        Returns a TreeView containing the node and all descendants
+        up to the specified depth.
 
         Args:
-            path: 根节点路径
-            max_depth: 最大递归深度（防止深层嵌套导致性能问题）
+            path: Root path for the subtree.
+            max_depth: Maximum recursion depth (prevents deep trees).
 
         Returns:
-            TreeView 包含完整子树结构，节点不存在时返回 None
+            TreeView if root exists, None otherwise.
         """
         node = await self._uow_factory.repo.get_by_path(path)
         if not node:
@@ -149,7 +256,7 @@ class SemaFS:
 
     async def _build_tree_view(self, node: TreeNode, depth: int,
                                max_depth: int) -> TreeView:
-        """递归构建树形视图。"""
+        """Recursively build TreeView structure."""
         children_views = ()
 
         if node.node_type == NodeType.CATEGORY and depth < max_depth:
@@ -164,13 +271,16 @@ class SemaFS:
 
     async def get_related(self, path: str) -> Optional[RelatedNodes]:
         """
-        获取节点的相关节点（导航地图）。
+        Get navigation map around a node.
+
+        Returns RelatedNodes containing parent, siblings, children,
+        and ancestors - useful for navigation and LLM context.
 
         Args:
-            path: 节点路径
+            path: Path of the focal node.
 
         Returns:
-            RelatedNodes 包含父节点、兄弟节点、子节点、祖先链
+            RelatedNodes if node exists, None otherwise.
         """
         current_view = await self.read(path)
         if not current_view:
@@ -179,6 +289,7 @@ class SemaFS:
         node = current_view.node
         np = NodePath(path)
 
+        # Parallel fetch of related nodes
         parent_node, sibling_nodes, children_nodes, ancestor_nodes = (
             await asyncio.gather(
                 self._uow_factory.repo.get_by_path(str(np.parent))
@@ -190,7 +301,7 @@ class SemaFS:
                 self._uow_factory.repo.get_ancestor_categories(path),
             ))
 
-        # 构建 NodeView
+        # Build NodeViews for each related node
         parent_view = None
         if parent_node:
             parent_view = await self.read(parent_node.path)
@@ -223,10 +334,13 @@ class SemaFS:
 
     async def stats(self) -> StatsView:
         """
-        获取知识库的统计信息。
+        Get knowledge base statistics.
+
+        Returns metrics including total nodes, depth, dirty categories,
+        and top categories by child count.
 
         Returns:
-            StatsView 包含节点数量、深度、热门目录等统计数据
+            StatsView with comprehensive statistics.
         """
         repo = self._uow_factory.repo
 
@@ -261,16 +375,30 @@ class SemaFS:
         )
 
     async def maintain(self) -> int:
+        """
+        Process all dirty categories.
+
+        Fetches categories marked as dirty (needing reorganization),
+        processes them deepest-first (leaf-to-root), and applies
+        the Strategy's reorganization plan.
+
+        Returns:
+            Number of categories successfully processed.
+        """
         dirty_cats = await self._uow_factory.repo.list_dirty_categories()
-        if not dirty_cats: return 0
+        if not dirty_cats:
+            return 0
+
+        # Process deepest categories first (leaf-to-root)
         dirty_cats.sort(key=lambda n: -n.depth)
         processed = 0
+
         for category in dirty_cats:
             try:
                 if await self._maintain_one(category.path):
                     processed += 1
             except Exception as e:
-                logger.error("[%s] 整理崩溃 '%s': %s",
+                logger.error("[%s] Maintenance failed for '%s': %s",
                              self.db_name,
                              category.path,
                              e,
@@ -278,14 +406,25 @@ class SemaFS:
         return processed
 
     async def _maintain_one(self, path: str) -> bool:
+        """
+        Maintain a single category.
 
+        Gathers context, calls Strategy for a plan, and executes it.
+        Handles status transitions and error recovery.
+
+        Args:
+            path: Path of the category to maintain.
+
+        Returns:
+            True if maintenance completed, False if skipped/failed.
+        """
         async with self._uow_factory.begin() as uow:
 
             category = await uow.repo.get_by_path(path)
             if not category or category.node_type != NodeType.CATEGORY:
                 return False
 
-            # 并行获取所有上下文信息
+            # Parallel fetch of all context information
             all_children, siblings, ancestors = await asyncio.gather(
                 uow.repo.list_children(
                     path,
@@ -307,12 +446,15 @@ class SemaFS:
                 ancestor_categories=tuple(ancestors),
             )
 
+            # Quick exit if nothing to do
             total_nodes = len(context.all_nodes)
             if not pending and total_nodes <= self._max_children:
                 category.clear_dirty()
                 uow.register_dirty(category)
                 await uow.commit()
                 return True
+
+            # Mark nodes as PROCESSING
             category.start_processing()
             uow.register_dirty(category)
             for child in context.all_nodes:
@@ -320,22 +462,27 @@ class SemaFS:
                 uow.register_dirty(child)
             await uow.commit()
 
+        # Call Strategy for reorganization plan (outside transaction)
         try:
             plan = await self._strategy.create_plan(context,
                                                     self._max_children)
         except Exception as e:
-            logger.warning("[%s] LLM 失败 '%s': %s", self.db_name, path, e)
-            await self._rollback_processing(path)
+            logger.warning("[%s] LLM failed for '%s': %s", self.db_name, path,
+                           e)
+            await self._safe_rollback_processing(path)
             return False
 
+        # No plan needed
         if plan is None:
             await self._finish_processing_without_changes(path)
             return True
 
+        # Execute the plan
         async with self._uow_factory.begin() as uow:
             try:
                 await self._executor.execute(plan, context, uow)
 
+                # Finish processing for nodes not covered by ops
                 covered_ids = set()
                 for op in plan.ops:
                     covered_ids.update(getattr(op, "ids", ()))
@@ -348,18 +495,39 @@ class SemaFS:
                 context.parent.finish_processing()
                 uow.register_dirty(context.parent)
 
+                await uow.commit()
+
             except PlanExecutionError as e:
-                logger.error("[%s] 计划执行失败 '%s': %s", self.db_name, path, e)
+                logger.error("[%s] Plan execution failed for '%s': %s",
+                             self.db_name, path, e)
                 await uow.rollback()
-                await self._rollback_processing(path)
+                await self._safe_rollback_processing(path)
                 return False
+            except Exception as e:
+                # Catch commit failures (e.g., IntegrityError) and rollback processing
+                logger.error("[%s] Commit failed for '%s': %s",
+                             self.db_name, path, e)
+                await uow.rollback()
+                await self._safe_rollback_processing(path)
+                raise
 
-            await uow.commit()
-
-        logger.info("[%s] 整理完成 '%s': %s", self.db_name, path, plan.ops_summary)
+        logger.info("[%s] Maintenance complete for '%s': %s", self.db_name,
+                    path, plan.ops_summary)
         return True
 
     async def _resolve_category(self, path: str) -> str:
+        """
+        Resolve a path to an existing category.
+
+        Walks up the path hierarchy to find the deepest existing category.
+        Falls back to "root" if no category exists.
+
+        Args:
+            path: Path to resolve.
+
+        Returns:
+            Path to the existing category (may be ancestor of input).
+        """
         clean = re.sub(r"[^a-z0-9._]", "", path.lower()).strip(".")
         parts = clean.split(".") if clean else []
         while parts:
@@ -370,7 +538,32 @@ class SemaFS:
             parts.pop()
         return "root"
 
+    async def _safe_rollback_processing(self, path: str) -> None:
+        """
+        Safely rollback PROCESSING status, logging errors instead of raising.
+
+        This wrapper ensures that rollback failures don't mask the original error.
+        Failed rollbacks will be recovered on next startup via _recover_processing_nodes.
+
+        Args:
+            path: Path of the category that failed.
+        """
+        try:
+            await self._rollback_processing(path)
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to rollback PROCESSING for '%s': %s. "
+                "Will be recovered on next startup.",
+                self.db_name, path, e
+            )
+
     async def _rollback_processing(self, path: str) -> None:
+        """
+        Rollback PROCESSING status to original status on failure.
+
+        Args:
+            path: Path of the category that failed.
+        """
         async with self._uow_factory.begin() as uow:
             category = await uow.nodes.get_by_path(path)
 
@@ -388,6 +581,14 @@ class SemaFS:
             await uow.commit()
 
     async def _finish_processing_without_changes(self, path: str) -> None:
+        """
+        Complete processing when no changes are needed.
+
+        Transitions nodes from PROCESSING to ACTIVE and clears dirty flag.
+
+        Args:
+            path: Path of the category.
+        """
         async with self._uow_factory.begin() as uow:
             category = await uow.nodes.get_by_path(path)
             if category:

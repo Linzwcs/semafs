@@ -1,3 +1,32 @@
+"""
+UnitOfWork and Factory protocols: Transaction management abstraction.
+
+This module defines the interfaces for the Unit of Work pattern, which
+provides atomic transaction management across the application.
+
+The architecture separates two concerns:
+- UoWFactory: Backend initialization and transaction creation
+- IUnitOfWork: Shopping cart for staging changes within a transaction
+
+This separation enables:
+- Swapping backends without application code changes
+- Clean testing with in-memory implementations
+- Proper transaction boundaries (caller controls commit/rollback)
+
+Usage:
+    # Initialize factory once at application startup
+    factory = SQLiteUoWFactory("semafs.db")
+    await factory.init()
+
+    # Read operations (no transaction)
+    node = await factory.repo.get_by_path("root.work")
+
+    # Write operations (within transaction)
+    async with factory.begin() as uow:
+        uow.register_new(new_node)
+        uow.register_dirty(modified_node)
+        await uow.commit()
+"""
 from __future__ import annotations
 from typing import AsyncIterator, Protocol, runtime_checkable
 from ..core.node import TreeNode
@@ -6,77 +35,156 @@ from .repo import NodeRepository
 
 @runtime_checkable
 class IUnitOfWork(Protocol):
-    """工作单元协议。通常作为异步上下文管理器使用。"""
+    """
+    Unit of Work protocol: Shopping cart for staged database changes.
 
+    IUnitOfWork implements the "shopping cart" pattern for database
+    operations. Changes are registered (staged) and only persisted
+    when commit() is called. This ensures atomicity - either all
+    changes succeed, or none do.
+
+    The Unit of Work is typically used as an async context manager
+    via UoWFactory.begin().
+
+    Attributes:
+        repo: The NodeRepository for querying during the transaction.
+
+    Lifecycle:
+        1. Create via factory.begin()
+        2. Register changes: register_new(), register_dirty(), register_cascade_rename()
+        3. Either commit() to persist or rollback() to discard
+        4. Context manager auto-rollbacks on exception
+    """
     repo: NodeRepository
 
     def register_new(self, node: TreeNode):
-        """登记一个全新创建的节点，commit 时执行 INSERT。"""
+        """
+        Stage a newly created node for INSERT.
+
+        Args:
+            node: A brand new TreeNode to be inserted.
+        """
         ...
 
     def register_dirty(self, node: TreeNode):
-        """登记一个被修改过的节点，commit 时执行 UPDATE。"""
+        """
+        Stage a modified node for UPDATE.
+
+        Args:
+            node: An existing TreeNode that has been modified.
+        """
         ...
 
     def register_cascade_rename(self, old_path: str, new_path: str):
-        """告诉底层数据库：把所有前缀为 old_path 的子孙节点，替换为 new_path"""
+        """
+        Stage a cascade path rename operation.
+
+        When a category is renamed, all its descendants need their
+        parent_path updated. This method stages that operation.
+
+        Args:
+            old_path: The old path prefix to replace.
+            new_path: The new path prefix.
+        """
         ...
 
     async def commit(self) -> None:
         """
-        将购物车里的所有变更一次性转化为数据库事务。
-        成功后清空购物车。
+        Atomically persist all staged changes.
+
+        Converts the shopping cart contents into database operations:
+        - INSERT for registered new nodes
+        - UPDATE for registered dirty nodes
+        - CASCADE UPDATE for registered renames
+
+        After successful commit, the staging area is cleared.
+
+        Raises:
+            Exception: If any database operation fails (triggers rollback).
         """
         ...
 
     async def rollback(self) -> None:
-        """放弃所有内存推演，回滚数据库事务，清空购物车。"""
+        """
+        Discard all staged changes and rollback the transaction.
+
+        Clears the staging area and reverts the database to its
+        state before the transaction began.
+        """
         ...
 
 
 @runtime_checkable
 class UoWFactory(Protocol):
     """
-    工作单元工厂协议。
+    Factory protocol for creating Unit of Work instances.
 
-    这是应用层唯一依赖的后端抽象入口。
-    任何后端（SQLite、PostgreSQL、内存）只需实现此协议。
+    UoWFactory is the single entry point for backend-specific operations.
+    It manages database connections and provides both read-only access
+    (via repo) and transactional access (via begin()).
 
-    两个职责，严格分离：
-    - repo:  NodeRepository，用于所有只读查询，独立于事务
-    - begin: 异步上下文管理器，每次开启一个原子写事务
+    Implementation Requirements:
+        - init() must be called before any operations
+        - close() should be called on application shutdown
+        - repo provides non-transactional read access
+        - begin() creates a transactional context
 
-    用法：
-        factory: UoWFactory = SQLiteUoWFactory("semafs.db")
+    Two Responsibilities (Strictly Separated):
+        1. repo: NodeRepository for read-only queries (no transaction)
+        2. begin(): Async context manager for atomic write transactions
+
+    Usage:
+        factory = SQLiteUoWFactory("semafs.db")
         await factory.init()
 
-        # 只读查询（不开事务）
+        # Read-only query (no transaction overhead)
         node = await factory.repo.get_by_path("root.work")
 
-        # 原子写操作
+        # Atomic write operation
         async with factory.begin() as uow:
             uow.register_new(new_node)
             uow.register_dirty(dirty_node)
-            await uow.commit()   # 或异常时自动 rollback
+            await uow.commit()  # Or exception triggers rollback
 
-    换后端只需换工厂实现，SemaFS / PlanExecutor 代码零改动。
+    Swapping backends requires only changing the factory implementation;
+    SemaFS and Executor code remains unchanged.
+
+    Attributes:
+        repo: NodeRepository for read-only queries outside transactions.
     """
-
     repo: NodeRepository
 
     async def init(self) -> None:
-        """初始化后端（建表、连接池等）。应用启动时调用一次。"""
+        """
+        Initialize the backend (create tables, connection pools, etc.).
+
+        Must be called once at application startup before any operations.
+        """
         ...
 
     async def close(self) -> None:
-        """关闭后端连接。应用退出时调用。"""
+        """
+        Close backend connections.
+
+        Should be called on application shutdown for clean resource release.
+        """
         ...
 
     def begin(self) -> AsyncIterator[IUnitOfWork]:
         """
-        开启一个工作单元上下文（异步上下文管理器）。
+        Create a new Unit of Work transactional context.
 
-        正常退出：调用方负责显式 commit()。
-        异常退出：自动 rollback，数据库回到原始状态。
+        Returns an async context manager that:
+        - Yields an IUnitOfWork for staging changes
+        - Auto-rollbacks on exception
+        - Requires explicit commit() for persistence
+
+        Usage:
+            async with factory.begin() as uow:
+                uow.register_new(node)
+                await uow.commit()
+
+        Yields:
+            IUnitOfWork instance for the transaction.
         """
         ...
