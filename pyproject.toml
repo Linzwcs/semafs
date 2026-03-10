@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 
 name = "semafs"
-version = "0.2.0"
+version = "0.2.1"
 description = "A semantic filesystem that uses LLM-powered strategies to automatically organize knowledge fragments"
 readme = "README.md"
 requires-python = ">=3.10"
