@@ -7,17 +7,13 @@ import os
 import random
 import sys
 from pathlib import Path
-from time import sleep
-
 from semafs.core.enums import NodeStatus
 from semafs.core.node import NodePath, TreeNode
 from semafs.semafs import SemaFS
 from semafs.storage.sqlite.factory import SQLiteUoWFactory
 from data.test_zh import PREFERENCE_FRAGMENTS, TEST_CATEGORIES
 
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+_project_root = Path('./')
 
 
 async def ensure_categories(factory: SQLiteUoWFactory) -> None:
@@ -36,7 +32,7 @@ async def ensure_categories(factory: SQLiteUoWFactory) -> None:
                 )
                 uow.register_new(cat)
                 await uow.commit()
-            print(f"  创建分类: {full}")
+            print(f"  Created category: {full}")
 
 
 async def seed_fragments(semafs: SemaFS, fragments: list[tuple[str,
@@ -67,10 +63,12 @@ async def seed_with_maintain(
         print(f"  📥 [{count}/{len(data)}] {path}: {content[:40]}...")
         if stream:
             await asyncio.sleep(random.uniform(delay_min, delay_max))
+
         for _ in range(max_rounds):
             processed = await semafs.maintain()
             if processed == 0:
                 break
+
     return count
 
 
@@ -80,67 +78,102 @@ def _get_db_path(name: str, override: str | None = None) -> Path:
     return _project_root / "tests" / "output" / f"semafs_{name}.db"
 
 
-async def run_openai(db_path: str | None = None, stream: bool = False) -> None:
-    """OpenAI 模式：使用真实 LLM 整理。"""
+async def run_openai(
+    db_path: str | None = None,
+    stream: bool = False,
+    data_size: int = 64,
+    max_children: int = 4,
+    base_url: str | None = None,
+) -> None:
+    """OpenAI mode: uses real LLM for organization."""
     try:
         from openai import AsyncOpenAI
     except ImportError:
-        print("请安装: pip install openai")
+        print("Please install: pip install openai")
         sys.exit(1)
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("请设置环境变量 OPENAI_API_KEY")
+        print("Please set environment variable OPENAI_API_KEY")
         sys.exit(1)
 
     path = _get_db_path("openai_demo", db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\n数据库: {path}")
+    print(f"\nDatabase: {path}")
 
     from semafs.infra.llm.openai import OpenAIAdapter
     from semafs.strategies.hybrid import HybridStrategy
 
+    resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL",
+                                              "http://35.220.164.252:3888/v1")
     client = AsyncOpenAI(api_key=api_key,
-                         base_url="http://35.220.164.252:3888/v1",
+                         base_url=resolved_base_url,
                          timeout=120.0)
     adapter = OpenAIAdapter(client, model="gpt-4o-mini")
-    strategy = HybridStrategy(adapter, max_children=8)
+    strategy = HybridStrategy(adapter, max_children=max_children)
 
     factory = SQLiteUoWFactory(path)
     await factory.init()
     try:
-        semafs = SemaFS(uow_factory=factory, strategy=strategy, max_children=8)
+        semafs = SemaFS(uow_factory=factory,
+                        strategy=strategy,
+                        max_children=max_children)
 
-        print("\n1️⃣ 创建分类目录...")
+        print("\n1. Creating category directories...")
         await ensure_categories(factory)
 
-        print("\n2️⃣ 写入偏好数据并整理（LLM 决策可能较慢）...")
-        n = await seed_with_maintain(semafs,
-                                     PREFERENCE_FRAGMENTS,
-                                     stream=stream)
-        print(f"  共写入 {n} 条碎片")
-
-        print("\n3️⃣ 读取结果...")
+        fragments = PREFERENCE_FRAGMENTS[:data_size]
+        print(
+            f"\n2. Writing {len(fragments)} fragments and maintaining (LLM may be slow)..."
+        )
+        n = await seed_with_maintain(semafs, fragments, stream=stream)
+        print(f"  Wrote {n} fragments")
+        print("\n3. Reading results...")
         for cat_path in ["root.work", "root.personal"]:
             views = await semafs.list(cat_path)
             active = [v for v in views if v.node.status == NodeStatus.ACTIVE]
-            print(f"  [{cat_path}]: {len(active)} 条")
-
-        print("\n✅ 数据库构建完成\n")
+            print(f"  [{cat_path}]: {len(active)} items")
+        print("\nDone.\n")
     finally:
         await factory.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SemaFS 测试数据构建")
-    parser.add_argument("--openai", action="store_true", help="使用 OpenAI API")
-    parser.add_argument("--db", default=None, help="数据库路径")
-    parser.add_argument("--stream", action="store_true", help="流式写入（打乱+随机间隔）")
+    parser = argparse.ArgumentParser(description="SemaFS test data builder")
+    parser.add_argument("--openai", action="store_true", help="Use OpenAI API")
+    parser.add_argument("--db", default=None, help="Database path")
+    parser.add_argument("--stream",
+                        action="store_true",
+                        help="Stream writes (shuffle + random delay)")
+    parser.add_argument(
+        "--data-size",
+        type=int,
+        default=64,
+        metavar="N",
+        help="Number of fragments to use from test data (default: 64)")
+    parser.add_argument(
+        "--max-children",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Max children threshold for LLM reorganization (default: 4)")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=
+        "OpenAI API base URL (default: OPENAI_BASE_URL env or built-in default)"
+    )
     parser.add_argument("--export",
                         action="store_true",
-                        help="导出数据库到 Markdown 视图")
-    parser.add_argument("-o", "--output", default=None, help="导出时的输出文件路径")
-    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志")
+                        help="Export database to Markdown view")
+    parser.add_argument("-o",
+                        "--output",
+                        default=None,
+                        help="Output file path for export")
+    parser.add_argument("-v",
+                        "--verbose",
+                        action="store_true",
+                        help="Verbose logging")
     args = parser.parse_args()
 
     if args.verbose:
@@ -153,7 +186,7 @@ def main():
         if not db_path.exists():
             db_path = _get_db_path("demo", None)
         if not db_path.exists():
-            print(f"错误: 数据库不存在: {db_path}", file=sys.stderr)
+            print(f"Error: database not found: {db_path}", file=sys.stderr)
             sys.exit(1)
         out_path = Path(args.output) if args.output else None
         md = asyncio.run(export_to_markdown(db_path, out_path))
@@ -162,11 +195,16 @@ def main():
         return
 
     if args.openai:
-        asyncio.run(run_openai(db_path=args.db, stream=args.stream))
+        asyncio.run(
+            run_openai(
+                db_path=args.db,
+                stream=args.stream,
+                data_size=args.data_size,
+                max_children=args.max_children,
+                base_url=args.base_url,
+            ))
     else:
         raise ValueError("Invalid argument, only support --openai")
-
-    sleep(1000)
 
 
 if __name__ == "__main__":
