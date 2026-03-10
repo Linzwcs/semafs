@@ -67,6 +67,8 @@ class Executor:
         - Snapshot-based: Uses context snapshot, not live DB queries
         - LLM-tolerant: Invalid IDs from LLM hallucinations are skipped
         - Supports short IDs: Matches both full UUIDs and 8-char prefixes
+        - Category-aware: When a leaf name conflicts with an existing category,
+          the leaf is placed inside that category instead of getting a suffix
 
     Error Handling:
         - Invalid node IDs: Logged as warning, operation skipped
@@ -82,6 +84,48 @@ class Executor:
             await uow.rollback()
             logger.error(f"Failed at op #{e.op_index}")
     """
+
+    async def _resolve_leaf_path(
+        self,
+        parent_path: str,
+        name: str,
+        uow: UnitOfWork,
+        fallback_prefix: str = "leaf",
+    ) -> NodePath:
+        """
+        Resolve the best path for a new leaf node.
+
+        If the preferred path points to an existing CATEGORY, the leaf will be
+        placed inside that category. Otherwise, uses ensure_unique_path to
+        avoid conflicts with existing leaves.
+
+        Args:
+            parent_path: Path of the parent category.
+            name: Preferred name for the leaf.
+            uow: UnitOfWork for database queries.
+            fallback_prefix: Prefix to use if name is invalid.
+
+        Returns:
+            The resolved path for the new leaf.
+        """
+        slug_name = _slug(name) or f"{fallback_prefix}_{uuid4().hex[:6]}"
+        preferred = NodePath(parent_path).child(slug_name)
+
+        # Check if preferred path is an existing CATEGORY
+        existing = await uow.nodes.get_by_path(str(preferred))
+        if existing and existing.node_type == NodeType.CATEGORY:
+            # Place leaf inside the category instead of alongside it
+            logger.info(
+                "[Executor] Path %s is a CATEGORY, placing leaf inside it",
+                preferred)
+            existing.request_semantic_rethink()
+            uow.register_dirty(existing)
+            child_path = preferred.child(
+                f"{fallback_prefix}_{uuid4().hex[:6]}")
+            return await uow.nodes.ensure_unique_path(child_path)
+
+        # Normal case: ensure unique path at the same level
+        return await uow.nodes.ensure_unique_path(preferred)
 
     async def execute(
         self,
@@ -134,8 +178,9 @@ class Executor:
                     case PersistOp():
                         await self._do_persist(op, context, uow, resolve)
                     case _:
-                        logger.warning("[Executor] Unknown Op type: %s, skipping",
-                                       type(op))
+                        logger.warning(
+                            "[Executor] Unknown Op type: %s, skipping",
+                            type(op))
             except Exception as exc:
                 raise PlanExecutionError(str(exc), op_index=i) from exc
 
@@ -182,6 +227,8 @@ class Executor:
 
         The parent path is derived from the context (all merges stay in
         the same directory). Content and name come entirely from the LLM.
+        If the target name conflicts with an existing CATEGORY, the merged
+        leaf is placed inside that category.
 
         Args:
             op: The MergeOp to execute.
@@ -195,11 +242,13 @@ class Executor:
         for nid in op.ids:
             node = resolve(nid)
             if not node:
-                logger.warning("[Executor] MERGE: id=%s not in context, skipping", nid)
+                logger.warning(
+                    "[Executor] MERGE: id=%s not in context, skipping", nid)
                 continue
             if node.node_type != NodeType.LEAF:
                 logger.warning(
-                    "[Executor] MERGE: id=%s is CATEGORY, cannot merge, skipping", nid)
+                    "[Executor] MERGE: id=%s is CATEGORY, cannot merge, skipping",
+                    nid)
                 continue
             # Archive the original node
             node.archive()
@@ -207,13 +256,16 @@ class Executor:
             valid_nodes.append(node)
 
         if not valid_nodes:
-            logger.warning("[Executor] MERGE: No valid leaf nodes, skipping entire MergeOp")
+            logger.warning(
+                "[Executor] MERGE: No valid leaf nodes, skipping entire MergeOp"
+            )
             return
 
-        # Create new merged leaf
-        name = _slug(op.name) or f"merged_{uuid4().hex[:6]}"
-        preferred = NodePath(parent_path_str).child(name)
-        safe_path = await uow.nodes.ensure_unique_path(preferred)
+        # Create new merged leaf (category-aware path resolution)
+        safe_path = await self._resolve_leaf_path(parent_path_str,
+                                                  op.name,
+                                                  uow,
+                                                  fallback_prefix="merged")
 
         new_leaf = TreeNode.new_leaf(
             path=safe_path,
@@ -262,7 +314,8 @@ class Executor:
 
         # Handle existing category (seamless merge)
         if existing_cat and existing_cat.node_type == NodeType.CATEGORY:
-            logger.info(f"Target directory {cat_path} exists, merging into it...")
+            logger.info(
+                f"Target directory {cat_path} exists, merging into it...")
             safe_cat_path = NodePath(existing_cat.path)
             existing_cat.request_semantic_rethink()
             uow.register_dirty(existing_cat)
@@ -285,7 +338,9 @@ class Executor:
             node = resolve(nid)
 
             if not node or node.node_type != NodeType.LEAF:
-                logger.warning("[Executor] GROUP: id=%s invalid or not leaf, skipping", nid)
+                logger.warning(
+                    "[Executor] GROUP: id=%s invalid or not leaf, skipping",
+                    nid)
                 continue
             # Archive original
             node.archive()
@@ -334,8 +389,9 @@ class Executor:
         """
         node = resolve(op.ids[0])
         if not node or node.node_type != NodeType.LEAF:
-            logger.warning("[Executor] MOVE: Source id=%s invalid or not leaf, skipping",
-                           op.ids[0])
+            logger.warning(
+                "[Executor] MOVE: Source id=%s invalid or not leaf, skipping",
+                op.ids[0])
             return
 
         # Verify target exists and is a category
@@ -351,10 +407,11 @@ class Executor:
         node.archive()
         uow.register_dirty(node)
 
-        # Create new leaf at target
-        name = _slug(op.name) or f"moved_{uuid4().hex[:6]}"
-        preferred = NodePath(op.path_to_move).child(name)
-        safe_path = await uow.nodes.ensure_unique_path(preferred)
+        # Create new leaf at target (category-aware path resolution)
+        safe_path = await self._resolve_leaf_path(op.path_to_move,
+                                                  op.name,
+                                                  uow,
+                                                  fallback_prefix="moved")
 
         new_leaf = TreeNode.new_leaf(
             path=safe_path,
@@ -394,18 +451,19 @@ class Executor:
         """
         node = resolve(op.ids[0])
         if not node:
-            logger.warning("[Executor] PERSIST: id=%s not found, skipping", op.ids[0])
+            logger.warning("[Executor] PERSIST: id=%s not found, skipping",
+                           op.ids[0])
             return
 
         # Archive original fragment
         node.archive()
         uow.register_dirty(node)
 
-        # Create active leaf
-        parent_path = NodePath(context.parent.path)
-        name = _slug(op.name)
-        preferred = parent_path.child(name)
-        safe_path = await uow.nodes.ensure_unique_path(preferred)
+        # Create active leaf (category-aware path resolution)
+        safe_path = await self._resolve_leaf_path(context.parent.path,
+                                                  op.name,
+                                                  uow,
+                                                  fallback_prefix="leaf")
         payload = dict(op.payload)
 
         new_leaf = TreeNode.new_leaf(

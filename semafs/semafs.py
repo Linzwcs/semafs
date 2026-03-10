@@ -482,18 +482,19 @@ class SemaFS:
             try:
                 await self._executor.execute(plan, context, uow)
 
-                # Finish processing for nodes not covered by ops
-                covered_ids = set()
-                for op in plan.ops:
-                    covered_ids.update(getattr(op, "ids", ()))
-
+                # Finish processing for all nodes still in PROCESSING state
+                # - Successfully processed nodes: already ARCHIVED, won't be affected
+                # - Skipped nodes (e.g., CATEGORY in MERGE op): still PROCESSING, will be finished
+                # - Nodes not in any op: still PROCESSING, will be finished
                 for node in context.all_nodes:
-                    if node.id not in covered_ids:
+                    if node.status == NodeStatus.PROCESSING:
                         node.finish_processing()
                         uow.register_dirty(node)
 
-                context.parent.finish_processing()
-                uow.register_dirty(context.parent)
+                # Finish processing for parent category
+                if context.parent.status == NodeStatus.PROCESSING:
+                    context.parent.finish_processing()
+                    uow.register_dirty(context.parent)
 
                 await uow.commit()
 
@@ -505,8 +506,8 @@ class SemaFS:
                 return False
             except Exception as e:
                 # Catch commit failures (e.g., IntegrityError) and rollback processing
-                logger.error("[%s] Commit failed for '%s': %s",
-                             self.db_name, path, e)
+                logger.error("[%s] Commit failed for '%s': %s", self.db_name,
+                             path, e)
                 await uow.rollback()
                 await self._safe_rollback_processing(path)
                 raise
@@ -553,9 +554,7 @@ class SemaFS:
         except Exception as e:
             logger.error(
                 "[%s] Failed to rollback PROCESSING for '%s': %s. "
-                "Will be recovered on next startup.",
-                self.db_name, path, e
-            )
+                "Will be recovered on next startup.", self.db_name, path, e)
 
     async def _rollback_processing(self, path: str) -> None:
         """

@@ -1,7 +1,7 @@
 """
 将 SemaFS 数据库导出为 Markdown 视图。
 
-参考 semafs-v0/exporter.py 实现，支持三种导出模式：
+参考 semafs/exporter.py 实现，支持三种导出模式：
 1. MarkdownExporter：每个 CATEGORY 导出为独立 .md 文件（扁平目录）
 2. TreeStructureExporter：仅导出文件夹架构
 3. TreeTextView：仅输出文本树视图到 stdout
