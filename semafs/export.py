@@ -1,12 +1,12 @@
 """
-将 SemaFS 数据库导出为 Markdown 视图。
+Export SemaFS database to Markdown view.
 
-参考 semafs/exporter.py 实现，支持三种导出模式：
-1. MarkdownExporter：每个 CATEGORY 导出为独立 .md 文件（扁平目录）
-2. TreeStructureExporter：仅导出文件夹架构
-3. TreeTextView：仅输出文本树视图到 stdout
+Reference semafs/exporter.py implementation. Supports three export modes:
+1. MarkdownExporter: Each CATEGORY exported as a separate .md file (flat directory)
+2. TreeStructureExporter: Export folder structure only
+3. TreeTextView: Output text tree view to stdout only
 
-用法：
+Usage:
     python -m semafs.export --db ./mydb.db
     python -m semafs.export --db ./mydb.db --out vault
     python -m semafs.export --db ./mydb.db --tree
@@ -40,7 +40,7 @@ def _node_meta_block(
     updated_at: str = "",
     name: str = "",
 ) -> str:
-    """节点元信息块，便于解析与区分。"""
+    """Node metadata block for parsing and identification."""
     parts = [f"类型: {node_type}", f"路径: {path}", f"状态: {status}"]
     if node_id:
         parts.append(f"ID: {node_id}")
@@ -56,7 +56,7 @@ def _node_meta_block(
 
 
 def _leaf_section(node: TreeNode, idx: int) -> str:
-    """单个叶节点渲染为独立区块，含完整元信息。"""
+    """Render a single leaf node as an independent block with full metadata."""
     slug = node.path.rsplit(".", 1)[-1]
     meta = _node_meta_block(
         node_type="LEAF",
@@ -91,7 +91,7 @@ def _leaf_section(node: TreeNode, idx: int) -> str:
 
 
 def _sub_category_entry(cat: TreeNode, fname: str) -> str:
-    """子 category 条目，含类型与路径。"""
+    """Sub-category entry with type and path."""
     name = cat.display_name or cat.name or cat.path.rsplit(".", 1)[-1]
     meta = _node_meta_block(
         node_type="CATEGORY",
@@ -166,12 +166,12 @@ def _render_category(
 
 
 def _category_filename(path: str) -> str:
-    """root → root.md，root.work → root.work.md"""
+    """root → root.md, root.work → root.work.md"""
     return path + ".md"
 
 
 def _path_to_dir(path: str) -> str:
-    """root → root/，root.work.personal → root/work/personal/"""
+    """root → root/, root.work.personal → root/work/personal/"""
     if not path or path == "root":
         return "root"
     return path.replace(".", "/")
@@ -186,8 +186,8 @@ def _segment_name(path: str) -> str:
 
 class TreeTextView:
     """
-    仅输出文本树视图，不创建任何文件或目录。
-    输出到 stdout，格式如：
+    Output text tree view only, without creating any files or directories.
+    Output to stdout, format example:
       root
       ├── personal
       │   ├── diet_health
@@ -200,7 +200,7 @@ class TreeTextView:
         self._lines: List[str] = []
 
     async def export(self, root_path: str = "root") -> str:
-        """返回树形文本。"""
+        """Return tree text."""
         self._lines = []
         await self._visit(root_path, "", True, is_root=True)
         return "\n".join(self._lines)
@@ -249,8 +249,8 @@ class TreeTextView:
 
 class TreeStructureExporter:
     """
-    仅导出文件夹架构，不生成 markdown 文件。
-    在 output_dir 下创建与 path 对应的目录结构，如 root/work/personal/。
+    Export folder structure only, without generating markdown files.
+    Create directory structure under output_dir matching path, e.g. root/work/personal/.
     """
 
     def __init__(self, repo, output_dir: str | Path = "tree") -> None:
@@ -259,7 +259,7 @@ class TreeStructureExporter:
         self._created = 0
 
     async def export(self, root_path: str = "root") -> int:
-        """导出从 root_path 开始的目录结构，返回创建的目录数。"""
+        """Export directory structure from root_path, return number of directories created."""
         self._created = 0
         await self._visit(root_path)
         logger.info(f"📁 导出完成：{self._created} 个目录 → {self._out}/")
@@ -293,13 +293,13 @@ class TreeStructureExporter:
 
 class MarkdownExporter:
     """
-    将每个 CATEGORY 节点导出为一个 .md 文件（扁平目录，无子文件夹）。
-    叶节点内容内联在所属目录文件中。
+    Export each CATEGORY node as a .md file (flat directory, no subfolders).
+    Leaf node content is inlined in the parent category file.
 
     Args:
-        repo:        NodeRepository 实现
-        output_dir:  导出目录（默认 "vault"）
-        only_active: True 时仅导出 ACTIVE 节点（默认 False，完整导出含 PENDING/PROCESSING）
+        repo:        NodeRepository implementation
+        output_dir:  Export directory (default "vault")
+        only_active: When True, export ACTIVE nodes only (default False, full export includes PENDING/PROCESSING)
     """
 
     def __init__(
@@ -315,7 +315,7 @@ class MarkdownExporter:
         self._written = 0
 
     async def export(self, root_path: str = "root") -> int:
-        """导出从 root_path 开始的完整子树，返回写入文件数。"""
+        """Export full subtree from root_path, return number of files written."""
         self._written = 0
         self._out.mkdir(parents=True, exist_ok=True)
         await self._visit(root_path)
@@ -351,7 +351,7 @@ class MarkdownExporter:
             await self._visit(sub.path)
 
 
-# --- 单文件导出（兼容原有 export_to_markdown）---
+# --- Single-file export (compatible with legacy export_to_markdown) ---
 
 
 def _heading(level: int) -> str:
@@ -365,7 +365,7 @@ async def _export_tree_single(
         depth: int = 0,
         statuses: tuple[NodeStatus, ...] = (NodeStatus.ACTIVE, ),
 ) -> None:
-    """递归遍历目录树，生成单文件 Markdown。"""
+    """Recursively traverse directory tree to generate single-file Markdown."""
     children = await repo.list_children(path, statuses=list(statuses))
 
     def _key(n):
@@ -400,8 +400,8 @@ async def _export_tree_single(
 async def export_to_markdown(db_path: Path,
                              out_path: Path | None = None) -> str:
     """
-    导出数据库到单文件 Markdown 字符串。若 out_path 指定则同时写入文件。
-    （兼容 run.py --export 调用）
+    Export database to single-file Markdown string. If out_path is specified, also write to file.
+    (Compatible with run.py --export invocation)
     """
     factory = SQLiteUoWFactory(db_path)
     await factory.init()
@@ -469,52 +469,54 @@ async def _export_tree(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m semafs.export",
-        description="SemaFS 数据库导出",
+        description="SemaFS database export",
     )
     parser.add_argument(
         "--db",
         default=None,
         metavar="PATH",
-        help="数据库路径（默认 tests/output/semafs_*_demo.db）",
+        help="Database path (default: tests/output/semafs_*_demo.db)",
     )
     parser.add_argument(
         "--out",
         default="vault",
         metavar="DIR",
-        help="导出目录（默认 vault）",
+        help="Export directory (default: vault)",
     )
     parser.add_argument(
         "--root",
         default="root",
         metavar="PATH",
-        help="导出起点路径",
+        help="Export root path",
     )
     parser.add_argument(
         "--tree",
         action="store_true",
-        help="导出文件夹架构（创建目录）",
+        help="Export folder structure (create directories)",
     )
     parser.add_argument(
         "--print",
         dest="print_only",
         action="store_true",
-        help="仅输出文本树视图，不创建文件或目录",
+        help="Output text tree view only, no files or directories created",
     )
     parser.add_argument(
         "--only-active",
         action="store_true",
-        help="仅导出 ACTIVE 节点（默认导出全部非归档状态）",
+        help="Export ACTIVE nodes only (default: export all non-archived)",
     )
     parser.add_argument(
         "--all-statuses",
         action="store_true",
-        help="导出所有状态（默认已启用，与 --only-active 互斥）",
+        help=
+        "Export all statuses (default enabled, mutually exclusive with --only-active)",
     )
     parser.add_argument(
         "-o",
         "--output",
         default=None,
-        help="单文件导出时的输出路径（与 --out 互斥）",
+        help=
+        "Output path for single-file export (mutually exclusive with --out)",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
 
@@ -531,7 +533,7 @@ def main() -> None:
     args.db = db_path
 
     if args.all_statuses:
-        args.only_active = False  # --all-statuses 显式要求完整导出
+        args.only_active = False  # --all-statuses explicitly requests full export
 
     if args.output is not None:
         out = None if args.output == "-" else Path(args.output)
