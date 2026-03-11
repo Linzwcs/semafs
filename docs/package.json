@@ -1,0 +1,14 @@
+{
+  "name": "semafs-docs",
+  "version": "0.2.1",
+  "private": true,
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.3.0",
+    "vitepress-plugin-mermaid": "^2.0.16"
+  }
+}
