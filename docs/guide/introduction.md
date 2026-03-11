@@ -59,14 +59,17 @@ graph LR
 
 ### Hierarchical Organization
 
-Information precision increases with depth:
+The tree structure is **automatically organized**—categories and subcategories emerge from semantic clustering, not from predefined granularity. Depth levels are determined purely by how data gets grouped; there is no fixed mapping of "depth = granularity."
 
-| Depth | Granularity | Example |
-|-------|-------------|---------|
-| 0 | Global overview | "Software engineer, coffee lover..." |
-| 1 | Domain summary | "Food preferences: Japanese cuisine..." |
-| 2 | Topic details | "Coffee: dark roast, Ethiopian..." |
-| 3+ | Atomic facts | "Discovered V60 method in March 2024" |
+```
+root/
+├── preferences/          ← auto-grouped by semantics
+│   ├── food/             ← subcategory emerges when needed
+│   │   ├── coffee        ← depth depends on data organization
+│   │   └── cuisine
+│   └── work/
+└── projects/
+```
 
 ### Auto-Maintenance
 

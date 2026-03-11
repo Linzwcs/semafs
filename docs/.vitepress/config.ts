@@ -47,6 +47,7 @@ export default withMermaid(
               { text: 'Reading & Querying', link: '/guide/reading' },
               { text: 'Maintenance', link: '/guide/maintenance' },
               { text: 'LLM Integration', link: '/guide/llm-integration' },
+              { text: 'Agent Memory', link: '/guide/agent-memory' },
             ]
           },
           {
