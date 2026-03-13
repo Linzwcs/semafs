@@ -33,8 +33,9 @@ class TestNodePath:
         assert NodePath("root.work").depth == 2
 
     def test_invalid_segment_raises(self):
-        with pytest.raises(ValueError, match="非法路径段"):
-            NodePath("root").child("")
+        with pytest.raises(ValueError, match="Invalid path segment"):
+           NodePath("root").child("")
+
 
 
 # --- TreeNode ---
