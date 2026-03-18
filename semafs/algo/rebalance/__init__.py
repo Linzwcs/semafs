@@ -1,6 +1,7 @@
-"""Strategies - Rebalance strategy implementations."""
+"""Rebalancing strategies."""
 
 from .rule import RuleOnlyStrategy
 from .hybrid import HybridStrategy
 
 __all__ = ["RuleOnlyStrategy", "HybridStrategy"]
+

@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 
-from ..core.events import TreeEvent
-from ..ports.propagation import Policy, Signal, Context, Step
+from ...core.events import TreeEvent
+from ...ports.propagation import Policy, Signal, Context, Step
 
 
 @dataclass
@@ -61,3 +61,4 @@ class DepthAwarePolicy:
         if base.signal.value < effective_threshold:
             return Step(base.signal, False, "depth_cutoff")
         return base
+

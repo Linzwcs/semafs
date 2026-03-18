@@ -2,12 +2,21 @@
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
+from uuid import uuid4
 
-from ..core.node import NodeStage, NodeType
+from ..core.node import Node, NodeStage, NodeType
 from ..core.capacity import Budget, Zone
+from ..core.ops import RenameOp
+from ..core.terminal import TerminalConfig, TerminalGroupMode
+from ..core.summary import (
+    build_category_meta,
+    normalize_category_meta,
+    render_category_summary,
+)
 from ..core.snapshot import Snapshot
-from ..core.events import TreeEvent
+from ..core.events import TreeEvent, Persisted
 from ..ports.store import NodeStore
 from ..ports.factory import UoWFactory
 from ..ports.strategy import Strategy
@@ -15,6 +24,7 @@ from ..ports.bus import EventBus
 from ..ports.summarizer import Summarizer
 from ..ports.propagation import Policy, Signal, Context
 from .executor import Executor
+from .guard import PlanGuard
 from .resolver import Resolver
 
 logger = logging.getLogger(__name__)
@@ -34,6 +44,8 @@ class Keeper:
             summarizer: Summarizer,
             policy: Policy,
             default_budget: Budget = Budget(),
+            terminal_config: TerminalConfig = TerminalConfig(),
+            guard: PlanGuard | None = None,
     ):
         self._store = store
         self._uow_factory = uow_factory
@@ -41,9 +53,11 @@ class Keeper:
         self._strategy = strategy
         self._executor = executor
         self._resolver = resolver
+        self._guard = guard or PlanGuard()
         self._summarizer = summarizer
         self._policy = policy
         self._default_budget = default_budget
+        self._terminal_config = terminal_config
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def reconcile(
@@ -57,6 +71,8 @@ class Keeper:
         emitted_events: list[TreeEvent] = []
         next_node_id: str | None = None
         next_signal: Signal | None = None
+        plan_summary_changed = False
+        plan_renamed_nodes = False
 
         lock = self._locks.setdefault(node_id, asyncio.Lock())
         async with lock:
@@ -66,30 +82,92 @@ class Keeper:
 
             # v2.1.4 rule: only origin hop can rebalance structure.
             if allow_rebalance:
+                is_terminal = self._is_terminal(snapshot)
                 needs_rebalance = snapshot.has_pending or snapshot.zone in (
                     Zone.PRESSURED,
                     Zone.OVERFLOW,
                 )
+                if is_terminal and not self._allow_terminal_group(snapshot):
+                    needs_rebalance = False
                 if needs_rebalance:
                     raw_plan = await self._strategy.draft(snapshot)
                     if raw_plan:
+                        raw_plan = self._guard.validate_raw_plan(raw_plan)
                         plan = self._resolver.compile(raw_plan, snapshot)
-                        if not plan.is_empty():
+                        plan = self._guard.validate_plan(plan)
+                        plan = self._guard.filter_ops_for_snapshot(
+                            plan, snapshot
+                        )
+                        if (not plan.is_empty() or plan.has_name_update()
+                                or plan.has_summary_update()
+                                or plan.has_keywords_update()):
+                            plan_renamed_nodes = any(
+                                isinstance(op, RenameOp) for op in plan.ops
+                            )
                             async with self._uow_factory.begin() as uow:
-                                events = self._executor.execute(
-                                    plan, snapshot, uow)
+                                events = []
+                                if not plan.is_empty():
+                                    events = self._executor.execute(
+                                        plan, snapshot, uow)
+                                plan_summary_changed = (
+                                    self._apply_plan_category_updates(
+                                        plan, snapshot, uow
+                                    )
+                                )
                                 await uow.commit()
                             emitted_events.extend(events)
                             snapshot = await self._build_snapshot(node_id)
 
-            new_summary = await self._summarizer.summarize(snapshot)
-            summary_changed = self._summary_changed(snapshot.target.summary,
-                                                    new_summary)
-            if summary_changed:
+            # Lifecycle management: pending is a queue stage, not a Plan op.
+            if snapshot.pending:
                 async with self._uow_factory.begin() as uow:
-                    await self._update_summary(node_id, new_summary, uow)
+                    persisted_events = self._promote_pending(snapshot, uow)
                     await uow.commit()
+                emitted_events.extend(persisted_events)
+                snapshot = await self._build_snapshot(node_id)
 
+            if self._is_terminal(snapshot):
+                rollup_applied = await self._apply_terminal_rollup(snapshot)
+                if rollup_applied:
+                    snapshot = await self._build_snapshot(node_id)
+
+            summary_changed = False
+            if plan_summary_changed:
+                summary_changed = True
+            else:
+                raw_summary = await self._summarizer.summarize(snapshot)
+                meta, new_summary = self._build_snapshot_meta_and_summary(
+                    snapshot,
+                    raw_summary,
+                    None,
+                )
+                logger.debug(
+                    "category_meta keywords source=%s node=%s",
+                    meta.get("ext", {}).get("keyword_source"),
+                    snapshot.target.path.value,
+                )
+                summary_changed = self._summary_changed(
+                    snapshot.target.summary,
+                    new_summary,
+                )
+                meta_changed = snapshot.target.category_meta != meta
+                if summary_changed or meta_changed:
+                    async with self._uow_factory.begin() as uow:
+                        await self._update_summary(
+                            node_id,
+                            new_summary,
+                            meta,
+                            uow,
+                        )
+                        await uow.commit()
+                    snapshot = await self._build_snapshot(node_id)
+
+            # Cascade rename should still propagate upward even if summary text
+            # stays the same after recompute.
+            if not summary_changed and plan_renamed_nodes:
+                summary_changed = True
+
+            if summary_changed:
                 if snapshot.target.parent_id:
                     parent = await self._store.get_by_id(
                         snapshot.target.parent_id)
@@ -103,7 +181,7 @@ class Keeper:
                         )
                         step = self._policy.step(ctx)
                         logger.debug(
-                            "propagation hop: %s -> %s | signal=%.3f -> %.3f | "
+                            "propagation: %s -> %s | signal=%.3f -> %.3f | "
                             "depth=%d | continue=%s | reason=%s",
                             ctx.from_path,
                             ctx.to_path,
@@ -176,15 +254,225 @@ class Keeper:
             return True
         return old.strip() != new.strip()
 
-    async def _update_summary(self, node_id: str, new_summary: str,
-                              uow) -> None:
+    async def _update_summary(
+        self,
+        node_id: str,
+        new_summary: str,
+        category_meta: dict,
+        uow,
+    ) -> None:
         node = await self._store.get_by_id(node_id)
         if node:
-            uow.register_dirty(node.with_summary(new_summary))
+            updated = node.with_summary(new_summary)
+            updated = updated.with_category_meta(category_meta)
+            uow.register_dirty(updated)
 
     async def _publish_events(self, events: list[TreeEvent]) -> None:
         for event in events:
             await self._bus.publish(event)
+
+    def _promote_pending(self, snapshot: Snapshot, uow) -> list[Persisted]:
+        events: list[Persisted] = []
+        for pending in snapshot.pending:
+            active = pending.with_stage(NodeStage.ACTIVE)
+            uow.register_dirty(active)
+            events.append(
+                Persisted(
+                    leaf_id=active.id,
+                    parent_id=snapshot.target.id,
+                    leaf_path=active.path.value,
+                    parent_path=snapshot.target.path.value,
+                )
+            )
+        return events
+
+    def _apply_plan_category_updates(
+        self,
+        plan,
+        snapshot: Snapshot,
+        uow,
+    ) -> bool:
+        """
+        Apply plan-level updates for target category.
+
+        Rules:
+        - updated_name must match ^[a-z]+$ (single english word)
+        - updated_summary must be non-empty after trim
+        """
+        changed = False
+        target = snapshot.target
+
+        if plan.updated_name and plan.updated_name != target.name:
+            # Keep top-level entry categories stable (e.g. root.work).
+            if target.path.depth <= 1:
+                logger.warning(
+                    "Skip rename for top-level category %s -> %s",
+                    target.path.value,
+                    plan.updated_name,
+                )
+            else:
+                uow.register_rename(target.id, plan.updated_name)
+                changed = True
+
+        if plan.updated_summary is not None or plan.updated_keywords:
+            meta, normalized = self._build_snapshot_meta_and_summary(
+                snapshot,
+                plan.updated_summary,
+                plan.updated_keywords if plan.updated_keywords else None,
+            )
+            logger.debug(
+                "plan updated_keywords source=%s node=%s",
+                meta.get("ext", {}).get("keyword_source"),
+                snapshot.target.path.value,
+            )
+            if (
+                self._summary_changed(target.summary, normalized)
+                or target.category_meta != meta
+            ):
+                updated = target.with_summary(normalized)
+                updated = updated.with_category_meta(meta)
+                uow.register_dirty(updated)
+                changed = True
+
+        return changed
+
+    def _build_snapshot_meta_and_summary(
+        self,
+        snapshot: Snapshot,
+        raw_summary: str | None,
+        preferred_keywords: tuple[str, ...] | None,
+    ) -> tuple[dict, str]:
+        leaf_texts = tuple(
+            n.content for n in (snapshot.leaves + snapshot.pending)
+            if n.content
+        )
+        child_names = tuple(n.name for n in snapshot.subcategories)
+        ext_payload = dict(snapshot.target.category_meta.get("ext", {}))
+        ext_payload["terminal"] = (
+            snapshot.target.path.depth >= self._terminal_config.terminal_depth
+            or bool(ext_payload.get("terminal"))
+        )
+        ext_payload.setdefault(
+            "rollup_window",
+            self._terminal_config.rollup_window,
+        )
+        ext_payload.setdefault(
+            "active_raw_limit",
+            self._terminal_config.active_raw_limit,
+        )
+
+        meta = build_category_meta(
+            raw_summary=raw_summary,
+            leaf_texts=leaf_texts,
+            child_names=child_names,
+            keywords=preferred_keywords,
+            ext=ext_payload,
+        )
+        normalized = normalize_category_meta(meta)
+        return normalized, render_category_summary(normalized)
+
+    def _is_terminal(self, snapshot: Snapshot) -> bool:
+        return self._is_terminal_node(snapshot.target)
+
+    def _is_terminal_node(self, node) -> bool:
+        ext = node.category_meta.get("ext", {})
+        if bool(ext.get("terminal")):
+            return True
+        return node.path.depth >= self._terminal_config.terminal_depth
+
+    def _allow_terminal_group(self, snapshot: Snapshot) -> bool:
+        if self._terminal_config.group_mode == TerminalGroupMode.DISABLED:
+            return False
+        if self._terminal_config.group_mode != TerminalGroupMode.HIGH_GAIN:
+            return False
+        required_gain_count = snapshot.budget.hard + max(
+            2, snapshot.budget.soft // 2
+        )
+        return (
+            snapshot.zone == Zone.OVERFLOW
+            and snapshot.total_children >= required_gain_count
+            and len(snapshot.pending) >= 2
+        )
+
+    async def _apply_terminal_rollup(self, snapshot: Snapshot) -> bool:
+        """
+        Roll up excessive raw leaves under terminal categories.
+
+        Strategy:
+        - Keep latest `active_raw_limit` leaves active
+        - Archive older leaves in batches
+        - Create one rollup leaf that summarizes archived batch
+        """
+        if len(snapshot.leaves) < self._terminal_config.rollup_trigger_count:
+            return False
+
+        ordered = sorted(snapshot.leaves, key=self._leaf_order_key)
+        overflow = len(ordered) - self._terminal_config.active_raw_limit
+        if overflow < self._terminal_config.min_rollup_batch:
+            return False
+
+        batch = ordered[:overflow]
+        rollup_content = self._build_rollup_content(batch, snapshot.target)
+        rollup_name = (
+            f"rollup_{self._terminal_config.rollup_window}_"
+            f"{uuid4().hex[:6]}"
+        )
+        rollup_leaf = Node.create_leaf(
+            parent_id=snapshot.target.id,
+            parent_path=snapshot.target.path.value,
+            name=rollup_name,
+            content=rollup_content,
+            payload={
+                "rollup": True,
+                "window": self._terminal_config.rollup_window,
+                "source_count": len(batch),
+                "source_ids": [leaf.id for leaf in batch],
+                "rolled_at": datetime.utcnow().isoformat() + "Z",
+            },
+            stage=NodeStage.ACTIVE,
+        )
+
+        async with self._uow_factory.begin() as uow:
+            uow.register_new(rollup_leaf)
+            for leaf in batch:
+                uow.register_removed(leaf.id)
+            # Persist terminal bookkeeping in category meta.ext
+            ext = dict(snapshot.target.category_meta.get("ext", {}))
+            ext["last_rollup_count"] = len(batch)
+            ext["last_rollup_window"] = self._terminal_config.rollup_window
+            ext["last_rollup_at"] = datetime.utcnow().isoformat() + "Z"
+            meta = dict(snapshot.target.category_meta)
+            meta["ext"] = ext
+            updated_target = snapshot.target.with_category_meta(meta)
+            uow.register_dirty(updated_target)
+            await uow.commit()
+        return True
+
+    @staticmethod
+    def _leaf_order_key(node: Node) -> tuple[str, str]:
+        payload = node.payload or {}
+        stamp = str(
+            payload.get("_ingested_at")
+            or payload.get("ingested_at")
+            or ""
+        )
+        return (stamp, node.name)
+
+    @staticmethod
+    def _build_rollup_content(leaves: list[Node], target: Node) -> str:
+        snippets = []
+        for leaf in leaves[:20]:
+            text = (leaf.content or "").strip().replace("\n", " ")
+            if not text:
+                continue
+            snippets.append(f"- {text[:120]}")
+        joined = "\n".join(snippets) if snippets else "- (empty batch)"
+        return (
+            f"Rollup for {target.path.value}\n"
+            f"items: {len(leaves)}\n"
+            f"window: auto-{datetime.utcnow().date().isoformat()}\n"
+            f"{joined}"
+        )[:2000]
 
     async def _scan_signal(self, node_id: str) -> Signal:
         origin = await self._store.canonical_path(node_id) or node_id

@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass, field
 
-from ..core.events import TreeEvent, Grouped, Merged, Moved, Persisted, Placed
-from ..ports.propagation import Policy, Signal, Context, Step
+from ...core.events import TreeEvent, Grouped, Merged, Moved, Persisted, Placed
+from ...ports.propagation import Signal, Context, Step
 
 # Default event weights
 _DEFAULT_WEIGHTS: dict[type[TreeEvent], float] = {
@@ -37,10 +37,15 @@ class DefaultPolicy:
         if not (0 < self.decay <= 1):
             raise ValueError(f"decay must be in (0, 1], got {self.decay}")
         if not (0 <= self.threshold <= 1):
-            raise ValueError(f"threshold must be in [0, 1], got {self.threshold}")
+            raise ValueError(
+                f"threshold must be in [0, 1], got {self.threshold}"
+            )
         for evt_type, weight in self.event_weights.items():
             if weight < 0:
-                raise ValueError(f"weight for {evt_type.__name__} must be non-negative, got {weight}")
+                raise ValueError(
+                    f"weight for {evt_type.__name__} must be "
+                    f"non-negative, got {weight}"
+                )
 
     def seed(self, event: TreeEvent, target_path: str) -> Signal:
         """Event -> initial Signal."""
@@ -70,3 +75,4 @@ class DefaultPolicy:
             return Step(next_signal, False, "below_threshold")
 
         return Step(next_signal, True, "propagate")
+

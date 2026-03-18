@@ -7,6 +7,9 @@ from typing import Optional
 
 from .core.node import Node, NodePath, NodeType
 from .core.capacity import Budget
+from .core.naming import PathAllocator
+from .core.retrieval import RetrievalWeights, score_category_text
+from .core.terminal import TerminalConfig
 from .core.views import NodeView, TreeView, RelatedNodes, StatsView
 from .ports.store import NodeStore
 from .ports.factory import UoWFactory
@@ -17,6 +20,7 @@ from .ports.summarizer import Summarizer
 from .ports.propagation import Policy
 from .engine.keeper import Keeper
 from .engine.executor import Executor
+from .engine.guard import PlanGuard
 from .engine.resolver import Resolver
 from .engine.intake import Intake
 from .engine.pulse import Pulse
@@ -37,6 +41,7 @@ class SemaFS:
             summarizer: Summarizer,
             policy: Policy,
             budget: Budget = Budget(),
+            terminal_config: TerminalConfig = TerminalConfig(),
     ):
         self._store = store
         self._uow_factory = uow_factory
@@ -44,8 +49,10 @@ class SemaFS:
         self._budget = budget
 
         # Engine components
+        allocator = PathAllocator()
+        guard = PlanGuard()
         self._executor = Executor()
-        self._resolver = Resolver()
+        self._resolver = Resolver(allocator=allocator)
         self._keeper = Keeper(
             store=store,
             uow_factory=uow_factory,
@@ -53,11 +60,13 @@ class SemaFS:
             strategy=strategy,
             executor=self._executor,
             resolver=self._resolver,
+            guard=guard,
             summarizer=summarizer,
             policy=policy,
             default_budget=budget,
+            terminal_config=terminal_config,
         )
-        self._intake = Intake(placer=placer, store=store)
+        self._intake = Intake(placer=placer, store=store, allocator=allocator)
         self._pulse = Pulse(bus=bus, policy=policy, keeper=self._keeper)
 
         # Wire up event subscriptions
@@ -141,7 +150,12 @@ class SemaFS:
         node = current_view.node
         np = NodePath(path)
 
-        parent_node, sibling_nodes, children_nodes, ancestor_nodes = await asyncio.gather(
+        (
+            parent_node,
+            sibling_nodes,
+            children_nodes,
+            ancestor_nodes,
+        ) = await asyncio.gather(
             self._store.get_by_path(np.parent_str) if np.parent else None,
             self._store.list_siblings(node.id),
             self._store.list_children(node.id)
@@ -188,6 +202,45 @@ class SemaFS:
             dirty_categories=0,
             top_categories=(),
         )
+
+    async def search_categories(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        weights: RetrievalWeights | None = None,
+    ) -> list[tuple[str, float]]:
+        """
+        Search categories by hybrid keywords/summary scoring.
+
+        Returns:
+            list of (canonical_path, score), sorted by score desc.
+        """
+        all_ids = await self._store.all_node_ids()
+        if not all_ids:
+            return []
+        nodes = await asyncio.gather(
+            *[self._store.get_by_id(node_id) for node_id in all_ids]
+        )
+        scored: list[tuple[str, float]] = []
+        for node in nodes:
+            if not node or node.node_type != NodeType.CATEGORY:
+                continue
+            if node.path.value == "root":
+                continue
+            meta = node.category_meta or {}
+            raw_keywords = meta.get("keywords", [])
+            keywords = tuple(
+                str(v) for v in raw_keywords
+                if isinstance(v, str) and v.strip()
+            )
+            summary = str(meta.get("summary", node.summary or ""))
+            score = score_category_text(query, keywords, summary, weights)
+            if score <= 0:
+                continue
+            scored.append((node.path.value, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:max(1, limit)]
 
     async def sweep(self, limit: int | None = None) -> int:
         """Scan overflow categories and reconcile them."""

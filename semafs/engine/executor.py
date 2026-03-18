@@ -1,8 +1,9 @@
 """Executor - executes resolved Plans."""
 
-from ..core.node import Node, NodeStage
-from ..core.ops import Plan, MergeOp, GroupOp, MoveOp, PersistOp
-from ..core.events import Merged, Grouped, Moved, Persisted
+from ..core.node import Node
+from ..core.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
+from ..core.summary import build_category_meta, render_category_summary
+from ..core.events import Merged, Grouped, Moved
 from ..core.snapshot import Snapshot
 from ..ports.factory import UnitOfWork
 
@@ -11,7 +12,7 @@ class Executor:
     """Executes resolved Plans by applying operations to nodes."""
 
     def execute(self, plan: Plan, snapshot: Snapshot,
-                uow: UnitOfWork) -> list[Merged | Grouped | Moved | Persisted]:
+                uow: UnitOfWork) -> list[Merged | Grouped | Moved]:
         """
         Execute plan operations and register changes to UoW.
 
@@ -23,7 +24,7 @@ class Executor:
         Returns:
             List of emitted event objects
         """
-        events: list[Merged | Grouped | Moved | Persisted] = []
+        events: list[Merged | Grouped | Moved] = []
 
         # Build ID index (supports both full UUIDs and 8-char short IDs)
         id_index = self._build_id_index(snapshot)
@@ -46,10 +47,8 @@ class Executor:
                 if event:
                     events.append(event)
 
-            elif isinstance(op, PersistOp):
-                event = self._do_persist(op, snapshot, id_index, uow)
-                if event:
-                    events.append(event)
+            elif isinstance(op, RenameOp):
+                self._do_rename(op, id_index, uow)
 
         return events
 
@@ -71,12 +70,8 @@ class Executor:
 
     def _build_path_index(self, snapshot: Snapshot) -> dict[str, Node]:
         """Build path -> node lookup for categories in local context."""
-        nodes = (
-            (snapshot.target,)
-            + snapshot.subcategories
-            + snapshot.siblings
-            + snapshot.ancestors
-        )
+        nodes = ((snapshot.target, ) + snapshot.subcategories +
+                 snapshot.siblings + snapshot.ancestors)
         return {node.path.value: node for node in nodes}
 
     def _do_merge(self, op: MergeOp, snapshot: Snapshot,
@@ -89,12 +84,14 @@ class Executor:
         if not sources:
             return None
 
+        merged_content = self._merge_content(op.new_content, sources)
+
         # Create merged leaf
         merged = Node.create_leaf(
             parent_id=snapshot.target.id,
             parent_path=snapshot.target.path.value,
             name=op.new_name,
-            content=op.new_content,
+            content=merged_content,
         )
 
         # Register changes
@@ -110,6 +107,21 @@ class Executor:
             parent_path=snapshot.target.path.value,
         )
 
+    @staticmethod
+    def _merge_content(raw_content: str, sources: list[Node]) -> str:
+        """Guarantee non-empty merged leaf content."""
+        direct = (raw_content or "").strip()
+        if direct:
+            return direct
+        snippets = []
+        for source in sources:
+            text = (source.content or "").strip()
+            if text:
+                snippets.append(text[:160])
+        if snippets:
+            return "\n".join(f"- {item}" for item in snippets[:8])
+        return "Merged content (auto-generated)"
+
     def _do_group(self, op: GroupOp, snapshot: Snapshot,
                   index: dict[str, Node], uow: UnitOfWork) -> Grouped | None:
         """Execute group operation."""
@@ -120,25 +132,21 @@ class Executor:
         if not sources:
             return None
 
-        # Create new category
-        category = Node.create_category(
-            parent_id=snapshot.target.id,
-            parent_path=snapshot.target.path.value,
-            name=op.category_name,
-            summary=op.category_summary,
+        category = self._ensure_category_chain(
+            op.category_path,
+            op.category_summary,
+            tuple(n.content for n in sources if n.content),
+            tuple(n.name for n in sources),
+            snapshot,
+            uow,
         )
+        if not category:
+            return None
 
         # Move sources into category
-        moved_sources = [
-            s.with_parent(category.id, category.path.value) for s in sources
-        ]
-
         # Register changes
-        uow.register_new(category)
         for source in sources:
-            uow.register_removed(source.id)
-        for moved in moved_sources:
-            uow.register_new(moved)
+            uow.register_move(source.id, category.id)
 
         return Grouped(
             source_ids=tuple(s.id for s in sources),
@@ -148,9 +156,78 @@ class Executor:
             parent_path=snapshot.target.path.value,
         )
 
+    def _ensure_category_chain(
+        self,
+        category_path: str,
+        final_summary: str,
+        source_texts: tuple[str, ...],
+        source_names: tuple[str, ...],
+        snapshot: Snapshot,
+        uow: UnitOfWork,
+    ) -> Node | None:
+        """Ensure absolute category path exists, create missing segments."""
+        target_path = snapshot.target.path.value
+        if not category_path.startswith(f"{target_path}."):
+            return None
+
+        existing_by_path: dict[str, Node] = {target_path: snapshot.target}
+        for cat in snapshot.subcategories:
+            existing_by_path[cat.path.value] = cat
+
+        current = snapshot.target
+        current_path = target_path
+        segments = category_path[len(target_path) + 1:].split(".")
+        for index, segment in enumerate(segments):
+            next_path = f"{current_path}.{segment}"
+            found = existing_by_path.get(next_path)
+            if found:
+                if index == len(segments) - 1:
+                    meta = build_category_meta(
+                        raw_summary=final_summary,
+                        leaf_texts=source_texts,
+                        child_names=source_names,
+                    )
+                    normalized = render_category_summary(meta)
+                    if (
+                        found.summary != normalized
+                        or found.category_meta != meta
+                    ):
+                        updated = found.with_summary(normalized)
+                        updated = updated.with_category_meta(meta)
+                        uow.register_dirty(updated)
+                current = found
+                current_path = next_path
+                continue
+
+            child_names = (
+                source_names if index == len(segments) - 1
+                else (segments[index + 1],)
+            )
+            raw = final_summary if index == len(segments) - 1 else (
+                f"Subtree for {segment}"
+            )
+            meta = build_category_meta(
+                raw_summary=raw,
+                leaf_texts=source_texts,
+                child_names=child_names,
+            )
+            summary = render_category_summary(meta)
+            created = Node.create_category(
+                parent_id=current.id,
+                parent_path=current_path,
+                name=segment,
+                summary=summary,
+                category_meta=meta,
+            )
+            uow.register_new(created)
+            existing_by_path[next_path] = created
+            current = created
+            current_path = next_path
+
+        return current
+
     def _do_move(self, op: MoveOp, snapshot: Snapshot, index: dict[str, Node],
-                 path_index: dict[str, Node],
-                 uow: UnitOfWork) -> Moved | None:
+                 path_index: dict[str, Node], uow: UnitOfWork) -> Moved | None:
         """Execute move operation."""
         # Resolve source node
         source = index.get(op.leaf_id)
@@ -162,38 +239,32 @@ class Executor:
             return None
 
         # Create moved node
-        moved = source.with_parent(target.id, target.path.value)
-
         # Register changes
-        uow.register_removed(source.id)
-        uow.register_new(moved)
+        uow.register_move(source.id, target.id)
+
+        if target.path.value == "root":
+            new_path = f"root.{source.name}"
+        else:
+            new_path = f"{target.path.value}.{source.name}"
 
         return Moved(
-            leaf_id=moved.id,
+            leaf_id=source.id,
             target_category_id=target.id,
             old_path=source.path.value,
-            new_path=moved.path.value,
+            new_path=new_path,
             target_category=op.target_path,
         )
 
-    def _do_persist(self, op: PersistOp, snapshot: Snapshot, index: dict[str,
-                                                                         Node],
-                    uow: UnitOfWork) -> Persisted | None:
-        """Execute persist operation (convert pending to active)."""
-        # Resolve pending node
-        pending = index.get(op.leaf_id)
-        if not pending or pending.stage != NodeStage.PENDING:
-            return None
-
-        # Promote in place to avoid path-level uniqueness conflicts.
-        active = pending.with_stage(NodeStage.ACTIVE)
-
-        # Register changes
-        uow.register_dirty(active)
-
-        return Persisted(
-            leaf_id=active.id,
-            parent_id=snapshot.target.id,
-            leaf_path=active.path.value,
-            parent_path=snapshot.target.path.value,
-        )
+    def _do_rename(
+        self,
+        op: RenameOp,
+        index: dict[str, Node],
+        uow: UnitOfWork,
+    ) -> None:
+        """Execute rename operation as in-place update."""
+        source = index.get(op.node_id)
+        if not source:
+            return
+        if source.name == op.new_name:
+            return
+        uow.register_rename(source.id, op.new_name)

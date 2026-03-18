@@ -18,7 +18,7 @@ class GroupOp:
     """Group leaves into a new category."""
 
     source_ids: tuple[str, ...]  # IDs to group
-    category_name: str           # New category name
+    category_path: str           # Absolute target category path
     category_summary: str        # Category summary
 
 
@@ -31,10 +31,30 @@ class MoveOp:
 
 
 @dataclass(frozen=True)
-class PersistOp:
-    """Persist a pending fragment as active leaf (rule-only fallback)."""
+class RenameOp:
+    """Rename a node under the same parent."""
 
-    leaf_id: str                 # ID to persist
+    node_id: str
+    new_name: str
+
+
+@dataclass(frozen=True)
+class RollupOp:
+    """Roll up multiple leaves into a summary node."""
+
+    source_ids: tuple[str, ...]
+    rollup_summary: str
+    rollup_keywords: tuple[str, ...]
+    highlights: tuple[str, ...]
+    window_label: str  # e.g., "2026-w12"
+
+
+@dataclass(frozen=True)
+class ArchiveOp:
+    """Archive nodes (move to ARCHIVED stage)."""
+
+    source_ids: tuple[str, ...]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -46,8 +66,9 @@ class Plan:
     All paths are fully resolved (no relative references).
     """
 
-    ops: tuple[MergeOp | GroupOp | MoveOp | PersistOp, ...]
+    ops: tuple[MergeOp | GroupOp | MoveOp | RenameOp | RollupOp | ArchiveOp, ...]
     updated_summary: Optional[str] = None  # Updated parent summary
+    updated_keywords: tuple[str, ...] = ()  # Updated parent keywords
     updated_name: Optional[str] = None     # Updated parent name
     reasoning: Optional[str] = None        # Overall reasoning
 
@@ -58,6 +79,10 @@ class Plan:
     def has_summary_update(self) -> bool:
         """Check if plan updates parent summary."""
         return self.updated_summary is not None
+
+    def has_keywords_update(self) -> bool:
+        """Check if plan updates parent keywords."""
+        return len(self.updated_keywords) > 0
 
     def has_name_update(self) -> bool:
         """Check if plan updates parent name."""

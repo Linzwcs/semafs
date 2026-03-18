@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from .ops import PersistOp
-
 
 @dataclass(frozen=True)
 class RawMerge:
@@ -13,6 +11,7 @@ class RawMerge:
     source_ids: tuple[str, ...]  # Short IDs from LLM
     new_content: str
     new_name: str
+    evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -33,6 +32,25 @@ class RawMove:
 
 
 @dataclass(frozen=True)
+class RawRename:
+    """Raw rename operation from LLM (before resolution)."""
+
+    node_id: str
+    new_name: str
+
+
+@dataclass(frozen=True)
+class RawRollup:
+    """Raw rollup operation from LLM (before resolution)."""
+
+    source_ids: tuple[str, ...]  # Short IDs from LLM
+    rollup_summary: str
+    rollup_keywords: tuple[str, ...] = ()
+    highlights: tuple[str, ...] = ()
+    window_label: str = ""  # e.g., "2026-w12"
+
+
+@dataclass(frozen=True)
 class RawPlan:
     """
     Raw plan from LLM output (before resolution).
@@ -41,7 +59,8 @@ class RawPlan:
     Must be resolved to Plan before execution.
     """
 
-    ops: tuple[RawMerge | RawGroup | RawMove | PersistOp, ...]
+    ops: tuple[RawMerge | RawGroup | RawMove | RawRename | RawRollup, ...]
     updated_summary: Optional[str] = None
+    updated_keywords: tuple[str, ...] = ()
     updated_name: Optional[str] = None
     reasoning: Optional[str] = None

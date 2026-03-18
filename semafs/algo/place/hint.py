@@ -1,4 +1,4 @@
-"""Placer implementations — routing strategies for new content."""
+"""Hint-based placement algorithm."""
 
 
 class HintPlacer:
@@ -7,3 +7,4 @@ class HintPlacer:
     async def place(self, content: str, hint: str | None) -> str:
         """Return hint if provided, otherwise 'root'."""
         return hint if hint else "root"
+

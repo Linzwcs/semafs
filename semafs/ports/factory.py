@@ -3,7 +3,7 @@
 from typing import Protocol, runtime_checkable, AsyncIterator
 from contextlib import asynccontextmanager
 
-from ..core.node import Node
+from ..core.node import Node, NodeStage
 from .store import NodeStore
 
 
@@ -29,6 +29,10 @@ class UnitOfWork(Protocol):
 
     def register_move(self, node_id: str, new_parent_id: str) -> None:
         """Stage parent move."""
+        ...
+
+    def register_stage_change(self, node_id: str, new_stage: NodeStage) -> None:
+        """Stage node lifecycle stage change."""
         ...
 
     async def commit(self) -> None:

@@ -45,14 +45,13 @@ class LLMSummarizer:
             return snapshot.target.summary or ""
 
         content = "\n".join(parts)
-        prompt = (
-            f"Summarize the following items under category "
-            f"'{snapshot.target.name}' in 1-2 sentences:\n{content}"
-        )
+        prompt = (f"Summarize the following items under category "
+                  f"'{snapshot.target.name}' in 1-2 sentences:\n{content}")
 
         try:
             result = await self._adapter.call(snapshot)
-            return result.get("updated_content", "")[:500] or snapshot.target.summary or ""
+            return result.get("updated_content",
+                              "")[:500] or snapshot.target.summary or ""
         except Exception:
             # Fallback to rule-based
             return "; ".join(p.lstrip("- ") for p in parts)[:500]

@@ -6,6 +6,10 @@ from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
+from .naming import normalize_name
+
+_VALID_NAME_RE = re.compile(r"^[a-z0-9_]+$")
+
 
 class NodeType(Enum):
     """Node type enumeration."""
@@ -17,6 +21,8 @@ class NodeStage(Enum):
     """Node lifecycle stage."""
     ACTIVE = "active"
     PENDING = "pending"
+    COLD = "cold"          # Rolled up, retrievable but excluded from maintenance
+    ARCHIVED = "archived"
 
 
 @dataclass(frozen=True)
@@ -31,11 +37,11 @@ class NodePath:
             raise ValueError("Path cannot be empty")
         if self.value == "root":
             return
-        if not re.match(r'^[a-z0-9_]+(\.[a-z0-9_]+)*$', self.value):
+        if not re.match(r'^root\.[a-z0-9_]+(\.[a-z0-9_]+)*$', self.value):
             raise ValueError(
                 f"Invalid path: {self.value}. "
-                "Must contain only lowercase letters, numbers, "
-                "underscores, and dots"
+                "Must start with 'root.' and contain only lowercase "
+                "letters, numbers, underscores, and dots"
             )
 
     @classmethod
@@ -46,8 +52,12 @@ class NodePath:
     @classmethod
     def from_parent_and_name(cls, parent_path: str, name: str) -> "NodePath":
         """Create path from parent and name."""
-        if parent_path == "root" or not parent_path:
-            return cls(name)
+        if not parent_path:
+            if name == "root":
+                return cls.root()
+            return cls(f"root.{name}")
+        if parent_path == "root":
+            return cls(f"root.{name}")
         return cls(f"{parent_path}.{name}")
 
     @property
@@ -55,8 +65,6 @@ class NodePath:
         """Get parent path."""
         if self.value == "root":
             return None
-        if "." not in self.value:
-            return NodePath.root()
         return NodePath(self.value.rsplit(".", 1)[0])
 
     @property
@@ -79,7 +87,7 @@ class NodePath:
         """Get depth in tree (root = 0)."""
         if self.value == "root":
             return 0
-        return self.value.count(".") + 1
+        return self.value.count(".")
 
     def child(self, name: str) -> "NodePath":
         """Create child path."""
@@ -107,9 +115,26 @@ class Node:
     node_type: NodeType
     content: Optional[str] = None   # Only for leaves
     summary: Optional[str] = None   # Only for categories
+    category_meta: dict = field(default_factory=dict)  # Only for categories
     payload: dict = field(default_factory=dict)
     tags: tuple[str, ...] = field(default_factory=tuple)
     stage: NodeStage = NodeStage.ACTIVE
+
+    @staticmethod
+    def normalize_name(
+        raw_name: str,
+        *,
+        fallback_prefix: str = "node",
+    ) -> str:
+        """
+        Normalize arbitrary LLM/user-provided names into valid node names.
+
+        Rules:
+        - lowercase ascii letters / digits / underscore only
+        - collapse repeated separators
+        - fallback to <prefix>_<6hex> if empty after normalization
+        """
+        return normalize_name(raw_name, fallback_prefix=fallback_prefix)
 
     def __post_init__(self):
         """Validate node invariants."""
@@ -121,7 +146,9 @@ class Node:
             raise ValueError("Leaf nodes must have content")
         if self.node_type == NodeType.CATEGORY and self.summary is None:
             raise ValueError("Category nodes must have summary")
-        if not re.match(r'^[a-z0-9_]+$', self.name):
+        if self.node_type == NodeType.LEAF and self.category_meta:
+            raise ValueError("Leaf nodes cannot have category_meta")
+        if not _VALID_NAME_RE.match(self.name):
             raise ValueError(
                 f"Invalid name: {self.name}. "
                 "Must contain only lowercase letters, numbers, and underscores"
@@ -146,19 +173,22 @@ class Node:
         parent_path: str,
         name: str,
         summary: str,
+        category_meta: Optional[dict] = None,
         payload: Optional[dict] = None,
         tags: Optional[tuple[str, ...]] = None,
     ) -> "Node":
         """Create a new category node."""
+        normalized_name = cls.normalize_name(name, fallback_prefix="category")
         return cls(
             id=str(uuid4()),
             parent_id=parent_id,
-            name=name,
+            name=normalized_name,
             canonical_path=NodePath.from_parent_and_name(
-                parent_path, name
+                parent_path, normalized_name
             ).value,
             node_type=NodeType.CATEGORY,
             summary=summary,
+            category_meta=category_meta or {},
             payload=payload or {},
             tags=tags or (),
         )
@@ -175,15 +205,17 @@ class Node:
         stage: NodeStage = NodeStage.ACTIVE,
     ) -> "Node":
         """Create a new leaf node."""
+        normalized_name = cls.normalize_name(name, fallback_prefix="leaf")
         return cls(
             id=str(uuid4()),
             parent_id=parent_id,
-            name=name,
+            name=normalized_name,
             canonical_path=NodePath.from_parent_and_name(
-                parent_path, name
+                parent_path, normalized_name
             ).value,
             node_type=NodeType.LEAF,
             content=content,
+            category_meta={},
             payload=payload or {},
             tags=tags or (),
             stage=stage,
@@ -205,9 +237,16 @@ class Node:
             raise ValueError("Only categories can have summaries")
         return replace(self, summary=summary)
 
+    def with_category_meta(self, category_meta: dict) -> "Node":
+        """Create a copy with updated category metadata."""
+        if self.node_type != NodeType.CATEGORY:
+            raise ValueError("Only categories can have category metadata")
+        return replace(self, category_meta=category_meta)
+
     def with_name(self, name: str) -> "Node":
         """Create a copy with updated name."""
-        return replace(self, name=name)
+        normalized_name = self.normalize_name(name)
+        return replace(self, name=normalized_name)
 
     def with_parent(self, parent_id: str, parent_path: str) -> "Node":
         """Create a copy with updated parent identity and path projection."""

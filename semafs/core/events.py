@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 # Union type for all domain events
-TreeEvent = Union["Merged", "Grouped", "Moved", "Persisted", "Placed"]
+TreeEvent = Union[
+    "Merged", "Grouped", "Moved", "Persisted", "Placed", "RolledUp", "Archived"
+]
 
 
 @dataclass(frozen=True)
@@ -60,3 +62,25 @@ class Placed:
     parent_path: str  # Parent category path
     routed: bool  # Whether it was routed (True) or direct write (False)
     reasoning: Optional[str] = None  # Routing reasoning if applicable
+
+
+@dataclass(frozen=True)
+class RolledUp:
+    """Event: Multiple leaves were rolled up into a summary."""
+
+    source_ids: tuple[str, ...]  # IDs of rolled up leaves
+    rollup_id: str  # ID of rollup summary node
+    parent_id: str  # Parent category ID
+    rollup_path: str  # Path of rollup node
+    parent_path: str  # Parent category path
+    window_label: str  # e.g., "2026-w12"
+
+
+@dataclass(frozen=True)
+class Archived:
+    """Event: Nodes were archived."""
+
+    source_ids: tuple[str, ...]  # IDs of archived nodes
+    parent_id: str  # Parent category ID
+    parent_path: str  # Parent category path
+    reason: str  # Reason for archiving

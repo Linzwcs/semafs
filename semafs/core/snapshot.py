@@ -25,6 +25,7 @@ class Snapshot:
     ancestors: tuple[Node, ...]           # Ancestor chain (for context)
     budget: Budget                        # Capacity limits
     used_paths: frozenset[str]            # All paths in use (for uniqueness)
+    cold_leaves: tuple[Node, ...] = ()    # Cold leaves (rolled up, retrievable)
 
     @property
     def total_children(self) -> int:
