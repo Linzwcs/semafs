@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from ...core.raw import RawGroup, RawMerge, RawMove, RawRename
 from ...core.snapshot import Snapshot
 
 logger = logging.getLogger(__name__)
+_TOKEN_RE = re.compile(r"[a-z0-9_]{3,}")
+_STOPWORDS = {
+    "and", "or", "the", "a", "an", "of", "to", "in", "on",
+    "for", "with", "from", "by", "is", "are", "be", "this",
+    "that", "under", "into", "grouped", "related", "category",
+}
 
 
 def parse_keywords(value) -> tuple[str, ...]:
@@ -51,6 +58,46 @@ def fallback_group_summary(ids: tuple[str, ...], snapshot: Snapshot) -> str:
     if snippets:
         return "; ".join(snippets)
     return "Grouped related nodes under one semantic category."
+
+
+def fallback_group_keywords(
+    ids: tuple[str, ...],
+    snapshot: Snapshot,
+    summary: str,
+) -> tuple[str, ...]:
+    """Derive stable fallback keywords for GROUP when missing."""
+    by_id = {}
+    for node in snapshot.leaves + snapshot.pending + snapshot.subcategories:
+        by_id[node.id] = node
+        by_id[node.id[:8]] = node
+
+    pool = [summary]
+    for node_id in ids:
+        node = by_id.get(node_id)
+        if not node:
+            continue
+        if node.name:
+            pool.append(node.name)
+        text = (node.content or node.summary or "").strip()
+        if text:
+            pool.append(text[:160])
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for text in pool:
+        lowered = (text or "").lower()
+        for token in _TOKEN_RE.findall(lowered):
+            if token in seen or token in _STOPWORDS:
+                continue
+            if token.startswith(("leaf_", "rollup_")):
+                continue
+            seen.add(token)
+            out.append(token)
+            if len(out) >= 4:
+                return tuple(out)
+
+    # Keep deterministic non-empty fallback contract.
+    return tuple(out) if out else ("semantic", "cluster")
 
 
 def parse_raw_ops(raw_ops: list[dict], snapshot: Snapshot) -> list:
@@ -100,11 +147,19 @@ def parse_raw_ops(raw_ops: list[dict], snapshot: Snapshot) -> list:
                 group_summary = str(item.get("content", "")).strip()
                 if not group_summary:
                     group_summary = fallback_group_summary(ids, snapshot)
+                group_keywords = parse_keywords(item.get("keywords", []))
+                if not group_keywords:
+                    group_keywords = fallback_group_keywords(
+                        ids,
+                        snapshot,
+                        group_summary,
+                    )
                 ops.append(
                     RawGroup(
                         source_ids=ids,
                         category_name=item.get("name", ""),
                         category_summary=group_summary,
+                        category_keywords=group_keywords,
                     )
                 )
             elif op_type == "MOVE":

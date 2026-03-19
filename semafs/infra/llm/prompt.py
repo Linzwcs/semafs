@@ -6,6 +6,7 @@ from typing import Tuple
 from ...core.node import Node
 from ...core.rules import GENERIC_CATEGORY_NAMES
 from ...core.snapshot import Snapshot
+from ...engine.guard import is_name_locked_node
 
 KEYWORD_MIN_ITEMS = 2
 KEYWORD_MAX_ITEMS = 6
@@ -37,7 +38,7 @@ _TREE_OPS_SCHEMA = {
         "required": [
             "ops",
             "overall_reasoning",
-            "updated_content",
+            "updated_summary",
             "updated_keywords",
             "should_dirty_parent",
         ],
@@ -72,6 +73,18 @@ _TREE_OPS_SCHEMA = {
                             "description":
                             GROUP_SUMMARY_CONTRACT_TEXT,
                         },
+                        "keywords": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "minItems": KEYWORD_MIN_ITEMS,
+                            "maxItems": KEYWORD_MAX_ITEMS,
+                            "description": (
+                                "For GROUP: semantic keywords for the "
+                                "new category (2-6)."
+                            ),
+                        },
                         "path_to_move": {
                             "type": "string"
                         },
@@ -91,7 +104,7 @@ _TREE_OPS_SCHEMA = {
             "overall_reasoning": {
                 "type": "string"
             },
-            "updated_content": {
+            "updated_summary": {
                 "type":
                 "string",
                 "description":
@@ -174,8 +187,13 @@ def _format_node_list(nodes: list[Node]) -> str:
     lines = []
     for n in nodes:
         content = n.content or n.summary or ""
-        lines.append(f"  - [id: {n.id[:8]}] type: {n.node_type.value} | "
-                     f"name: {n.name} | content: {content[:120]}...")
+        lock_hint = ""
+        if is_name_locked_node(n):
+            lock_hint = " | skeleton: true | name_editable: false"
+        lines.append(
+            f"  - [id: {n.id[:8]}] type: {n.node_type.value} | "
+            f"name: {n.name}{lock_hint} | content: {content[:120]}..."
+        )
     return "\n".join(lines) + "\n\nNote: use id to identify nodes, not name."
 
 
@@ -226,6 +244,9 @@ def build_prompt(snapshot: Snapshot) -> Tuple[str, str]:
         "Stability guard: do NOT rename top-level categories under root "
         "(e.g. keep root.work/root.personal/"
         "root.learning/root.ideas stable).\n"
+        "Skeleton guard: categories marked with `name_editable: false` are "
+        "immutable in name. You may update summary/keywords, but do not "
+        "rename them.\n"
         "MERGE guard: only emit MERGE when there is clear non-empty "
         "semantic intersection across all source nodes.\n"
         "Prefer GROUP over MERGE for high-volume preference/log-like data.\n"
@@ -254,13 +275,15 @@ def build_prompt(snapshot: Snapshot) -> Tuple[str, str]:
         "If you provide updated_name, it MUST be a single english word: "
         "regex ^[a-z]+$.\n"
         "Names are RELATIVE to current dir.\n"
-        "updated_content: rewrite directory summary after ops.\n"
-        "updated_content contract: 1-3 concise sentences, plain text only, "
+        "updated_summary: rewrite directory summary after ops.\n"
+        "updated_summary contract: 1-3 concise sentences, plain text only, "
         f"max {SUMMARY_MAX_CHARS} chars, no markdown bullets, no JSON, "
         "no field labels.\n"
         "GROUP contract: each GROUP op must provide non-empty `content` as "
         f"category summary ({GROUP_SUMMARY_SENTENCE_RANGE} concise "
         "sentences).\n"
+        "GROUP keyword contract: each GROUP op should provide 2-6 semantic "
+        "keywords in `keywords`.\n"
         "updated_keywords contract: MUST provide "
         f"{KEYWORD_MIN_ITEMS}-{KEYWORD_MAX_ITEMS} semantic keywords for "
         "current category in every response.\n"
@@ -269,7 +292,7 @@ def build_prompt(snapshot: Snapshot) -> Tuple[str, str]:
         "If uncertain, derive keywords from major child themes.\n"
         "Summary contract: write 1-3 concise sentences that summarize all "
         "direct child content under the current category.\n"
-        "Never output operation schema text into updated_content "
+        "Never output operation schema text into updated_summary "
         "(e.g. op_type/ids/overall_reasoning/updated_keywords).\n"
         "should_dirty_parent: true if major new themes extracted.")
 

@@ -119,6 +119,8 @@ class Node:
     payload: dict = field(default_factory=dict)
     tags: tuple[str, ...] = field(default_factory=tuple)
     stage: NodeStage = NodeStage.ACTIVE
+    skeleton: bool = False
+    name_editable: bool = True
 
     @staticmethod
     def normalize_name(
@@ -148,6 +150,12 @@ class Node:
             raise ValueError("Category nodes must have summary")
         if self.node_type == NodeType.LEAF and self.category_meta:
             raise ValueError("Leaf nodes cannot have category_meta")
+        if self.node_type == NodeType.LEAF and self.skeleton:
+            raise ValueError("Leaf nodes cannot be skeleton nodes")
+        if self.node_type == NodeType.LEAF and not self.name_editable:
+            raise ValueError("Leaf nodes must be name-editable")
+        if self.skeleton and self.name_editable:
+            raise ValueError("Skeleton nodes must have non-editable names")
         if not _VALID_NAME_RE.match(self.name):
             raise ValueError(
                 f"Invalid name: {self.name}. "
@@ -164,6 +172,8 @@ class Node:
             canonical_path="root",
             node_type=NodeType.CATEGORY,
             summary="Root of knowledge tree",
+            skeleton=True,
+            name_editable=False,
         )
 
     @classmethod
@@ -176,6 +186,8 @@ class Node:
         category_meta: Optional[dict] = None,
         payload: Optional[dict] = None,
         tags: Optional[tuple[str, ...]] = None,
+        skeleton: bool = False,
+        name_editable: bool = True,
     ) -> "Node":
         """Create a new category node."""
         normalized_name = cls.normalize_name(name, fallback_prefix="category")
@@ -191,6 +203,8 @@ class Node:
             category_meta=category_meta or {},
             payload=payload or {},
             tags=tags or (),
+            skeleton=skeleton,
+            name_editable=name_editable,
         )
 
     @classmethod
@@ -219,6 +233,8 @@ class Node:
             payload=payload or {},
             tags=tags or (),
             stage=stage,
+            skeleton=False,
+            name_editable=True,
         )
 
     @property
@@ -245,8 +261,26 @@ class Node:
 
     def with_name(self, name: str) -> "Node":
         """Create a copy with updated name."""
+        if not self.name_editable:
+            raise ValueError(f"Node name is locked: {self.path.value}")
         normalized_name = self.normalize_name(name)
         return replace(self, name=normalized_name)
+
+    def with_name_editable(self, editable: bool) -> "Node":
+        """Create a copy with updated name editability."""
+        if self.node_type == NodeType.LEAF and not editable:
+            raise ValueError("Leaf nodes must be name-editable")
+        if self.skeleton and editable:
+            raise ValueError("Skeleton nodes must have non-editable names")
+        return replace(self, name_editable=editable)
+
+    def with_skeleton(self, skeleton: bool) -> "Node":
+        """Create a copy with updated skeleton flag."""
+        if self.node_type != NodeType.CATEGORY and skeleton:
+            raise ValueError("Only category nodes can be skeleton nodes")
+        if skeleton:
+            return replace(self, skeleton=True, name_editable=False)
+        return replace(self, skeleton=False)
 
     def with_parent(self, parent_id: str, parent_path: str) -> "Node":
         """Create a copy with updated parent identity and path projection."""
@@ -260,3 +294,7 @@ class Node:
     def with_stage(self, stage: NodeStage) -> "Node":
         """Create a copy with updated stage."""
         return replace(self, stage=stage)
+
+    def with_payload(self, payload: dict) -> "Node":
+        """Create a copy with updated payload."""
+        return replace(self, payload=payload)

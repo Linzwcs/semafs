@@ -21,6 +21,7 @@ class RawGroup:
     source_ids: tuple[str, ...]  # Short IDs from LLM
     category_name: str
     category_summary: str
+    category_keywords: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,8 @@ from ..core.snapshot import Snapshot
 class RuleSummarizer:
     """Rule-based summarizer — concatenates leaf content, no LLM."""
 
-    async def summarize(self, snapshot: Snapshot) -> str:
-        """Generate summary by concatenating child content."""
+    @staticmethod
+    def _rule_summary(snapshot: Snapshot) -> str:
         parts = []
         for leaf in snapshot.leaves:
             if leaf.content:
@@ -24,12 +24,12 @@ class RuleSummarizer:
 
         return "; ".join(parts)[:500]
 
-    async def summarize_with_keywords(
+    async def summarize(
         self,
         snapshot: Snapshot,
     ) -> tuple[str, tuple[str, ...] | None]:
         """Rule summarizer does not generate keywords."""
-        return await self.summarize(snapshot), None
+        return self._rule_summary(snapshot), None
 
 
 class LLMSummarizer:
@@ -38,12 +38,7 @@ class LLMSummarizer:
     def __init__(self, adapter):
         self._adapter = adapter
 
-    async def summarize(self, snapshot: Snapshot) -> str:
-        """Compatibility wrapper returning summary only."""
-        summary, _ = await self.summarize_with_keywords(snapshot)
-        return summary
-
-    async def summarize_with_keywords(
+    async def summarize(
         self,
         snapshot: Snapshot,
     ) -> tuple[str, tuple[str, ...] | None]:

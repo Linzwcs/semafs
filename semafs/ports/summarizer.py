@@ -9,16 +9,7 @@ from ..core.snapshot import Snapshot
 class Summarizer(Protocol):
     """Content summarization interface."""
 
-    async def summarize(self, snapshot: Snapshot) -> str:
-        """
-        Generate summary for category from snapshot.
-
-        Returns:
-            New summary text
-        """
-        ...
-
-    async def summarize_with_keywords(
+    async def summarize(
         self,
         snapshot: Snapshot,
     ) -> tuple[str, tuple[str, ...] | None]:

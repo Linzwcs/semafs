@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
-from ..core.node import NodeType
+from ..core.node import Node, NodeType
 from ..core.ops import Plan, GroupOp, MoveOp, RenameOp
 from ..core.raw import RawPlan, RawMerge, RawGroup
 from ..core.rules import (
@@ -33,6 +33,13 @@ _STOPWORDS = {
 }
 
 
+def is_name_locked_node(node: Node) -> bool:
+    """Whether category node name is locked by policy."""
+    if node.node_type != NodeType.CATEGORY:
+        return False
+    return not node.name_editable
+
+
 class GuardRejectCode(str, Enum):
     RAW_MERGE_NO_EVIDENCE = "RAW_MERGE_NO_EVIDENCE"
     RAW_MERGE_NO_CONTENT = "RAW_MERGE_NO_CONTENT"
@@ -43,6 +50,7 @@ class GuardRejectCode(str, Enum):
     INVALID_RENAME_NAME = "INVALID_RENAME_NAME"
     GENERIC_RENAME_NAME = "GENERIC_RENAME_NAME"
     LEAF_RENAME_BLOCKED = "LEAF_RENAME_BLOCKED"
+    SKELETON_RENAME_BLOCKED = "SKELETON_RENAME_BLOCKED"
     INVALID_UPDATED_NAME = "INVALID_UPDATED_NAME"
     SUSPICIOUS_SUMMARY = "SUSPICIOUS_SUMMARY"
     JSON_LIKE_SUMMARY = "JSON_LIKE_SUMMARY"
@@ -78,11 +86,7 @@ class GuardReport:
 class PlanGuard:
     """Validate/sanitize raw and resolved plans before execution."""
 
-    def validate_raw_plan(self, raw_plan: RawPlan) -> RawPlan:
-        validated, _ = self.validate_raw_plan_with_report(raw_plan)
-        return validated
-
-    def validate_raw_plan_with_report(
+    def validate_raw_plan(
         self,
         raw_plan: RawPlan,
     ) -> tuple[RawPlan, GuardReport]:
@@ -135,7 +139,13 @@ class PlanGuard:
                     )
                     continue
                 accepted_ops.append(
-                    replace(op, category_summary=group_summary)
+                    replace(
+                        op,
+                        category_summary=group_summary,
+                        category_keywords=self._sanitize_keywords(
+                            op.category_keywords
+                        ),
+                    )
                 )
                 continue
             accepted_ops.append(op)
@@ -151,11 +161,7 @@ class PlanGuard:
         )
         return validated, GuardReport(rejects=tuple(rejects))
 
-    def validate_plan(self, plan: Plan) -> Plan:
-        validated, _ = self.validate_plan_with_report(plan)
-        return validated
-
-    def validate_plan_with_report(
+    def validate_plan(
         self,
         plan: Plan,
     ) -> tuple[Plan, GuardReport]:
@@ -173,11 +179,7 @@ class PlanGuard:
         )
         return validated, GuardReport()
 
-    def filter_ops_for_snapshot(self, plan: Plan, snapshot: Snapshot) -> Plan:
-        filtered, _ = self.filter_ops_for_snapshot_with_report(plan, snapshot)
-        return filtered
-
-    def filter_ops_for_snapshot_with_report(
+    def filter_ops_for_snapshot(
         self,
         plan: Plan,
         snapshot: Snapshot,
@@ -263,6 +265,15 @@ class PlanGuard:
                     GuardRejectCode.LEAF_RENAME_BLOCKED,
                     "Reject leaf rename op",
                     node_id=node_id,
+                )
+                continue
+            if isinstance(op, RenameOp) and is_name_locked_node(target):
+                self._record_reject(
+                    rejects,
+                    GuardRejectCode.SKELETON_RENAME_BLOCKED,
+                    "Reject rename on locked skeleton category",
+                    node_id=node_id,
+                    path=target.path.value,
                 )
                 continue
             accepted.append(op)

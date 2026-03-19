@@ -11,11 +11,7 @@ from ...core.placement import (
 class HintPlacer:
     """Use hint path directly, fallback to 'root'."""
 
-    async def place(self, content: str, hint: str | None) -> str:
-        """Return hint if provided, otherwise 'root'."""
-        return hint if hint else "root"
-
-    async def place_recursive(
+    async def place(
         self,
         content: str,
         start_path: str = "root",

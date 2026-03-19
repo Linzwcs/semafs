@@ -1,6 +1,6 @@
-"""SemaFS v2.1.4 - Semantic Filesystem with ID-first architecture."""
+"""SemaFS v2.1.13 - Semantic filesystem."""
 
-__version__ = "2.1.4"
+__version__ = "2.1.13"
 
 from .semafs import SemaFS
 

@@ -60,6 +60,7 @@ class Resolver:
                         source_ids=raw_op.source_ids,
                         category_path=cat_path,
                         category_summary=raw_op.category_summary,
+                        category_keywords=raw_op.category_keywords,
                     )
                 )
 

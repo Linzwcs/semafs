@@ -13,7 +13,8 @@ class InMemoryEventBus:
 
     async def publish(self, event: TreeEvent) -> None:
         """Publish event to all subscribers of its type."""
-        for handler in self._handlers.get(type(event), []):
+        handlers = tuple(self._handlers.get(type(event), ()))
+        for handler in handlers:
             await handler(event)
 
     def subscribe(

@@ -25,7 +25,12 @@ from ..ports.bus import EventBus
 from ..ports.summarizer import Summarizer
 from ..ports.propagation import Policy, Signal, Context
 from .executor import Executor
-from .guard import PlanGuard, GuardReport
+from .guard import (
+    PlanGuard,
+    GuardReport,
+    GuardRejectCode,
+    is_name_locked_node,
+)
 from .resolver import Resolver
 
 logger = logging.getLogger(__name__)
@@ -40,32 +45,32 @@ class ReconcileMetrics:
     zone: str
     allow_rebalance: bool
     has_pending: bool
-    rebalance_attempted: bool = False
-    rebalance_applied: bool = False
-    lifecycle_promoted: int = 0
-    rollup_applied: bool = False
+    rebalance_tried: bool = False
+    rebalance_done: bool = False
+    promoted: int = 0
+    rolled_up: bool = False
     summary_changed: bool = False
     propagated: bool = False
-    emitted_events: int = 0
-    guard_reject_total: int = 0
-    guard_reject_counts: dict[str, int] = field(default_factory=dict)
+    events: int = 0
+    guard_rejects: int = 0
+    guard_codes: dict[str, int] = field(default_factory=dict)
 
     def as_log_payload(self) -> dict:
         return {
-            "node_id": self.node_id,
+            "id": self.node_id,
             "path": self.path,
             "zone": self.zone,
             "allow_rebalance": self.allow_rebalance,
             "has_pending": self.has_pending,
-            "rebalance_attempted": self.rebalance_attempted,
-            "rebalance_applied": self.rebalance_applied,
-            "lifecycle_promoted": self.lifecycle_promoted,
-            "rollup_applied": self.rollup_applied,
+            "rebalance_tried": self.rebalance_tried,
+            "rebalance_done": self.rebalance_done,
+            "promoted": self.promoted,
+            "rolled_up": self.rolled_up,
             "summary_changed": self.summary_changed,
             "propagated": self.propagated,
-            "emitted_events": self.emitted_events,
-            "guard_reject_total": self.guard_reject_total,
-            "guard_reject_counts": self.guard_reject_counts,
+            "events": self.events,
+            "guard_rejects": self.guard_rejects,
+            "guard_codes": self.guard_codes,
         }
 
 
@@ -130,29 +135,29 @@ class Keeper:
                 rebalance_events,
                 plan_summary_changed,
                 plan_renamed_nodes,
-            ) = await self._run_rebalance_phase(
+            ) = await self._rebalance_phase(
                 snapshot,
                 allow_rebalance=allow_rebalance,
                 metrics=metrics,
             )
             emitted_events.extend(rebalance_events)
 
-            snapshot, lifecycle_events = await self._run_lifecycle_phase(
+            snapshot, lifecycle_events = await self._lifecycle_phase(
                 snapshot
             )
             emitted_events.extend(lifecycle_events)
-            metrics.lifecycle_promoted = len(lifecycle_events)
+            metrics.promoted = len(lifecycle_events)
 
-            snapshot, rollup_applied = await self._run_rollup_phase(snapshot)
-            metrics.rollup_applied = rollup_applied
+            snapshot, rollup_applied = await self._rollup_phase(snapshot)
+            metrics.rolled_up = rollup_applied
 
-            snapshot, summary_changed = await self._run_summary_phase(
+            snapshot, summary_changed = await self._summary_phase(
                 snapshot,
                 plan_summary_changed=plan_summary_changed,
             )
             metrics.summary_changed = summary_changed
 
-            next_node_id, next_signal = await self._run_propagation_phase(
+            next_node_id, next_signal = await self._propagation_phase(
                 snapshot=snapshot,
                 signal=signal,
                 cause=cause,
@@ -163,7 +168,7 @@ class Keeper:
 
         if emitted_events:
             await self._publish_events(emitted_events)
-        metrics.emitted_events = len(emitted_events)
+        metrics.events = len(emitted_events)
         self._log_reconcile_metrics(metrics)
 
         if next_node_id and next_signal:
@@ -175,7 +180,7 @@ class Keeper:
             )
         return True
 
-    async def _run_rebalance_phase(
+    async def _rebalance_phase(
         self,
         snapshot: Snapshot,
         *,
@@ -187,7 +192,7 @@ class Keeper:
             return snapshot, [], False, False
 
         if metrics is not None:
-            metrics.rebalance_attempted = True
+            metrics.rebalance_tried = True
 
         is_terminal = self._is_terminal(snapshot)
         needs_rebalance = snapshot.has_pending or snapshot.zone in (
@@ -203,15 +208,11 @@ class Keeper:
         if not raw_plan:
             return snapshot, [], False, False
 
-        raw_plan, raw_guard_report = self._guard.validate_raw_plan_with_report(
-            raw_plan
-        )
+        raw_plan, raw_guard_report = self._guard.validate_raw_plan(raw_plan)
         plan = self._resolver.compile(raw_plan, snapshot)
-        plan, resolved_guard_report = self._guard.validate_plan_with_report(
-            plan
-        )
+        plan, resolved_guard_report = self._guard.validate_plan(plan)
         plan, snapshot_guard_report = (
-            self._guard.filter_ops_for_snapshot_with_report(plan, snapshot)
+            self._guard.filter_ops_for_snapshot(plan, snapshot)
         )
         guard_total, guard_counts = self._guard_metrics(
             reports=(
@@ -221,8 +222,8 @@ class Keeper:
             ),
         )
         if metrics is not None:
-            metrics.guard_reject_total = guard_total
-            metrics.guard_reject_counts = guard_counts
+            metrics.guard_rejects = guard_total
+            metrics.guard_codes = guard_counts
         self._log_guard_metrics(
             path=snapshot.target.path.value,
             total=guard_total,
@@ -246,7 +247,7 @@ class Keeper:
             )
             await uow.commit()
         if metrics is not None:
-            metrics.rebalance_applied = True
+            metrics.rebalance_done = True
         refreshed = await self._build_snapshot(snapshot.target.id)
         return refreshed, events, plan_summary_changed, plan_renamed_nodes
 
@@ -282,7 +283,7 @@ class Keeper:
     def _log_reconcile_metrics(metrics: ReconcileMetrics) -> None:
         logger.debug("reconcile_metrics %s", metrics.as_log_payload())
 
-    async def _run_lifecycle_phase(
+    async def _lifecycle_phase(
         self,
         snapshot: Snapshot,
     ) -> tuple[Snapshot, list[Persisted]]:
@@ -295,7 +296,7 @@ class Keeper:
         refreshed = await self._build_snapshot(snapshot.target.id)
         return refreshed, persisted_events
 
-    async def _run_rollup_phase(
+    async def _rollup_phase(
         self,
         snapshot: Snapshot,
     ) -> tuple[Snapshot, bool]:
@@ -307,7 +308,7 @@ class Keeper:
             return snapshot, False
         return await self._build_snapshot(snapshot.target.id), True
 
-    async def _run_summary_phase(
+    async def _summary_phase(
         self,
         snapshot: Snapshot,
         *,
@@ -317,9 +318,7 @@ class Keeper:
         if plan_summary_changed:
             return snapshot, True
 
-        raw_summary, llm_keywords = (
-            await self._summarizer.summarize_with_keywords(snapshot)
-        )
+        raw_summary, llm_keywords = await self._summarizer.summarize(snapshot)
         meta, new_summary = self._build_snapshot_meta_and_summary(
             snapshot,
             raw_summary,
@@ -349,7 +348,7 @@ class Keeper:
         refreshed = await self._build_snapshot(snapshot.target.id)
         return refreshed, summary_changed
 
-    async def _run_propagation_phase(
+    async def _propagation_phase(
         self,
         *,
         snapshot: Snapshot,
@@ -391,7 +390,7 @@ class Keeper:
             return None, None
         return parent.id, step.signal
 
-    async def sweep_overloaded(self, limit: int | None = None) -> int:
+    async def sweep(self, limit: int | None = None) -> int:
         node_ids = await self._find_overloaded_nodes(limit=limit)
         processed = 0
         for node_id in node_ids:
@@ -493,6 +492,13 @@ class Keeper:
                     "Skip rename for top-level category %s -> %s",
                     target.path.value,
                     plan.updated_name,
+                )
+            elif is_name_locked_node(target):
+                logger.warning(
+                    "plan_guard_reject code=%s message=%s path=%s",
+                    GuardRejectCode.SKELETON_RENAME_BLOCKED.value,
+                    "Reject updated_name on locked skeleton category",
+                    target.path.value,
                 )
             else:
                 uow.register_rename(target.id, plan.updated_name)

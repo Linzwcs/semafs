@@ -60,7 +60,7 @@ class Intake:
         if hint:
             target_path = hint
         else:
-            route = await self.placer.place_recursive(
+            route = await self.placer.place(
                 content,
                 start_path="root",
             )

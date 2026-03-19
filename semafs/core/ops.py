@@ -9,8 +9,8 @@ class MergeOp:
     """Merge multiple leaves into one."""
 
     source_ids: tuple[str, ...]  # IDs to merge
-    new_content: str             # Merged content
-    new_name: str                # Name for merged leaf
+    new_content: str  # Merged content
+    new_name: str  # Name for merged leaf
 
 
 @dataclass(frozen=True)
@@ -18,16 +18,17 @@ class GroupOp:
     """Group leaves into a new category."""
 
     source_ids: tuple[str, ...]  # IDs to group
-    category_path: str           # Absolute target category path
-    category_summary: str        # Category summary
+    category_path: str  # Absolute target category path
+    category_summary: str  # Category summary
+    category_keywords: tuple[str, ...]  # Category keywords
 
 
 @dataclass(frozen=True)
 class MoveOp:
     """Move a leaf to an existing category."""
 
-    leaf_id: str                 # ID to move
-    target_path: str             # Target category path (resolved)
+    leaf_id: str  # ID to move
+    target_path: str  # Target category path (resolved)
 
 
 @dataclass(frozen=True)
@@ -66,11 +67,12 @@ class Plan:
     All paths are fully resolved (no relative references).
     """
 
-    ops: tuple[MergeOp | GroupOp | MoveOp | RenameOp | RollupOp | ArchiveOp, ...]
+    ops: tuple[MergeOp | GroupOp | MoveOp | RenameOp | RollupOp | ArchiveOp,
+               ...]
     updated_summary: Optional[str] = None  # Updated parent summary
     updated_keywords: tuple[str, ...] = ()  # Updated parent keywords
-    updated_name: Optional[str] = None     # Updated parent name
-    reasoning: Optional[str] = None        # Overall reasoning
+    updated_name: Optional[str] = None  # Updated parent name
+    reasoning: Optional[str] = None  # Overall reasoning
 
     def is_empty(self) -> bool:
         """Check if plan has no operations."""

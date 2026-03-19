@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from ..core.node import Node, NodeStage
+from ..core.node import Node
 
 
 @runtime_checkable
@@ -31,14 +31,6 @@ class NodeStore(Protocol):
 
     async def list_children(self, node_id: str) -> list[Node]:
         """List all active children of a node."""
-        ...
-
-    async def list_children_by_stage(
-        self,
-        node_id: str,
-        stage: NodeStage,
-    ) -> list[Node]:
-        """List children of a node filtered by stage."""
         ...
 
     async def list_siblings(self, node_id: str) -> list[Node]:

@@ -38,7 +38,7 @@ class HybridStrategy:
             parsed = parse_raw_ops(raw_ops, snapshot)
             return RawPlan(
                 ops=tuple(parsed),
-                updated_summary=result.get("updated_content"),
+                updated_summary=result.get("updated_summary"),
                 updated_keywords=parse_keywords(
                     result.get("updated_keywords", [])),
                 updated_name=result.get("updated_name"),

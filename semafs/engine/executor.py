@@ -135,6 +135,7 @@ class Executor:
         category = self._ensure_category_chain(
             op.category_path,
             op.category_summary,
+            op.category_keywords,
             tuple(n.content for n in sources if n.content),
             tuple(n.name for n in sources),
             snapshot,
@@ -160,6 +161,7 @@ class Executor:
         self,
         category_path: str,
         final_summary: str,
+        final_keywords: tuple[str, ...],
         source_texts: tuple[str, ...],
         source_names: tuple[str, ...],
         snapshot: Snapshot,
@@ -186,6 +188,7 @@ class Executor:
                         raw_summary=final_summary,
                         leaf_texts=source_texts,
                         child_names=source_names,
+                        keywords=final_keywords if final_keywords else None,
                     )
                     normalized = render_category_summary(meta)
                     if (
@@ -210,6 +213,11 @@ class Executor:
                 raw_summary=raw,
                 leaf_texts=source_texts,
                 child_names=child_names,
+                keywords=(
+                    final_keywords
+                    if index == len(segments) - 1 and final_keywords
+                    else None
+                ),
             )
             summary = render_category_summary(meta)
             created = Node.create_category(

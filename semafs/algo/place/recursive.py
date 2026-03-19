@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
 
 from ...core.node import Node, NodeType
 from ...core.placement import (
@@ -12,22 +11,8 @@ from ...core.placement import (
     PlacementRoute,
     PlacementStep,
 )
+from ...ports.llm import LLMAdapter
 from ...ports.store import NodeStore
-
-
-class PlacementLLMAdapter(Protocol):
-    """Placement-specific LLM interface."""
-
-    async def call_placement(
-        self,
-        *,
-        content: str,
-        current_path: str,
-        current_summary: str,
-        children: tuple[dict[str, str], ...],
-    ) -> dict:
-        """Return placement decision payload."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -44,21 +29,14 @@ class LLMRecursivePlacer:
     def __init__(
         self,
         store: NodeStore,
-        adapter: PlacementLLMAdapter,
+        adapter: LLMAdapter,
         config: PlacementConfig = PlacementConfig(),
     ):
         self._store = store
         self._adapter = adapter
         self._config = config
 
-    async def place(self, content: str, hint: str | None) -> str:
-        """Resolve target path for write pipeline."""
-        if hint:
-            return hint
-        route = await self.place_recursive(content, start_path="root")
-        return route.target_path
-
-    async def place_recursive(
+    async def place(
         self,
         content: str,
         start_path: str = "root",

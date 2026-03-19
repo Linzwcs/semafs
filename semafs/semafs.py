@@ -1,11 +1,9 @@
-"""SemaFS - Main facade for the semantic filesystem."""
-
 from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
 
-from .core.node import Node, NodePath, NodeType
+from .core.node import Node, NodePath, NodeType, NodeStage
 from .core.capacity import Budget
 from .core.naming import PathAllocator
 from .core.terminal import TerminalConfig
@@ -47,7 +45,6 @@ class SemaFS:
         self._bus = bus
         self._budget = budget
 
-        # Engine components
         allocator = PathAllocator()
         guard = PlanGuard()
         self._executor = Executor()
@@ -68,7 +65,6 @@ class SemaFS:
         self._intake = Intake(placer=placer, store=store, allocator=allocator)
         self._pulse = Pulse(bus=bus, policy=policy, keeper=self._keeper)
 
-        # Wire up event subscriptions
         self._pulse.subscribe()
 
     async def write(
@@ -193,19 +189,168 @@ class SemaFS:
 
     async def stats(self) -> StatsView:
         """Get knowledge base statistics."""
-        # Simplified stats — just return placeholder
+        node_ids = tuple(await self._store.all_node_ids())
+        if not node_ids:
+            return StatsView(
+                total_categories=0,
+                total_leaves=0,
+                max_depth=0,
+                dirty_categories=0,
+                top_categories=(),
+            )
+
+        nodes = await asyncio.gather(
+            *[self._store.get_by_id(node_id) for node_id in node_ids])
+        active_nodes = tuple(node for node in nodes if node is not None)
+        categories = tuple(node for node in active_nodes
+                           if node.node_type == NodeType.CATEGORY)
+        leaves = tuple(node for node in active_nodes
+                       if node.node_type == NodeType.LEAF)
+        max_depth = max((node.path.depth for node in active_nodes), default=0)
+
+        child_lists = await asyncio.gather(
+            *[self._store.list_children(node.id) for node in categories])
+        dirty_categories = 0
+        ranked_categories: list[tuple[str, int]] = []
+        for category, children in zip(categories, child_lists, strict=False):
+            child_count = len(children)
+            ranked_categories.append((category.path.value, child_count))
+            if any(child.stage == NodeStage.PENDING for child in children):
+                dirty_categories += 1
+        top_categories = tuple(
+            sorted(ranked_categories, key=lambda item: item[1],
+                   reverse=True)[:5])
+
         return StatsView(
-            total_categories=0,
-            total_leaves=0,
-            max_depth=0,
-            dirty_categories=0,
-            top_categories=(),
+            total_categories=len(categories),
+            total_leaves=len(leaves),
+            max_depth=max_depth,
+            dirty_categories=dirty_categories,
+            top_categories=top_categories,
         )
 
     async def sweep(self, limit: int | None = None) -> int:
         """Scan overflow categories and reconcile them."""
-        return await self._keeper.sweep_overloaded(limit=limit)
+        return await self._keeper.sweep(limit=limit)
 
-    async def maintain(self, limit: int | None = None) -> int:
-        """Backward-compatible alias of `sweep`."""
-        return await self.sweep(limit=limit)
+    async def apply_skeleton(
+        self,
+        skeleton: dict | list[str] | tuple[str, ...] | str,
+        *,
+        source: str = "manual",
+    ) -> int:
+        """
+        Apply skeleton categories and lock their names.
+
+        Skeleton categories can still update summary/meta, but category names
+        are protected from rename operations.
+        """
+        paths = self._collect_skeleton_paths(skeleton)
+        if not paths:
+            return 0
+
+        changed = 0
+        async with self._uow_factory.begin() as uow:
+            staged_by_path: dict[str, Node] = {}
+            for path in paths:
+                existing = staged_by_path.get(path)
+                if existing is None:
+                    existing = await self._store.get_by_path(path)
+
+                if existing:
+                    if existing.node_type != NodeType.CATEGORY:
+                        raise ValueError(
+                            "Skeleton path conflicts with leaf node: "
+                            f"{path}")
+                    locked = existing.with_skeleton(True)
+                    payload = dict(locked.payload)
+                    payload["skeleton_source"] = source
+                    locked = locked.with_payload(payload)
+                    if locked != existing:
+                        uow.register_dirty(locked)
+                        changed += 1
+                        staged_by_path[path] = locked
+                    continue
+
+                parent_path = NodePath(path).parent_str
+                parent = staged_by_path.get(parent_path)
+                if parent is None:
+                    parent = await self._store.get_by_path(parent_path)
+                if not parent:
+                    raise ValueError(
+                        f"Skeleton parent not found: {parent_path}")
+                if parent.node_type != NodeType.CATEGORY:
+                    raise ValueError("Skeleton parent is not a category: "
+                                     f"{parent_path}")
+                name = NodePath(path).name
+                summary = f"Skeleton category: {name}"
+                node = Node.create_category(
+                    parent_id=parent.id,
+                    parent_path=parent.path.value,
+                    name=name,
+                    summary=summary,
+                    category_meta={},
+                    payload={"skeleton_source": source},
+                    skeleton=True,
+                    name_editable=False,
+                )
+                uow.register_new(node)
+                staged_by_path[path] = node
+                changed += 1
+            await uow.commit()
+        return changed
+
+    def _collect_skeleton_paths(
+        self,
+        skeleton: dict | list[str] | tuple[str, ...] | str,
+    ) -> tuple[str, ...]:
+        paths: set[str] = set()
+        if isinstance(skeleton, str):
+            paths.add(self._normalize_skeleton_path(skeleton))
+        elif isinstance(skeleton, (list, tuple)):
+            for item in skeleton:
+                if not isinstance(item, str):
+                    raise ValueError("Skeleton path list must contain strings")
+                paths.add(self._normalize_skeleton_path(item))
+        elif isinstance(skeleton, dict):
+            root_tree = skeleton
+            if ("root" in skeleton and isinstance(skeleton.get("root"), dict)
+                    and len(skeleton) == 1):
+                root_tree = skeleton["root"]
+            self._walk_skeleton_tree("root", root_tree, paths)
+        else:
+            raise ValueError("Unsupported skeleton payload type")
+
+        return tuple(
+            sorted(
+                (p for p in paths if p != "root"),
+                key=lambda p: p.count("."),
+            ))
+
+    def _walk_skeleton_tree(
+        self,
+        parent_path: str,
+        tree: dict,
+        paths: set[str],
+    ) -> None:
+        for raw_name, children in tree.items():
+            if not isinstance(raw_name, str):
+                raise ValueError("Skeleton category name must be string")
+            name = Node.normalize_name(raw_name, fallback_prefix="category")
+            path = NodePath.from_parent_and_name(parent_path, name).value
+            paths.add(path)
+            if children is None:
+                continue
+            if not isinstance(children, dict):
+                raise ValueError("Skeleton tree child must be dict or null: "
+                                 f"{path}")
+            self._walk_skeleton_tree(path, children, paths)
+
+    @staticmethod
+    def _normalize_skeleton_path(path: str) -> str:
+        cleaned = path.strip()
+        if not cleaned:
+            raise ValueError("Skeleton path cannot be empty")
+        if cleaned != "root" and not cleaned.startswith("root."):
+            cleaned = f"root.{cleaned}"
+        return NodePath(cleaned).value

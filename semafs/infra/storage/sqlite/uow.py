@@ -5,9 +5,9 @@ import json
 import sqlite3
 from collections import defaultdict
 
-from ...core.node import Node, NodeType
-from ...core.summary import normalize_category_meta, render_category_summary
-from ...ports.factory import UnitOfWork
+from ....core.node import Node, NodeType
+from ....core.summary import normalize_category_meta, render_category_summary
+from ....ports.factory import UnitOfWork
 
 
 class SQLiteUnitOfWork(UnitOfWork):
@@ -49,8 +49,9 @@ class SQLiteUnitOfWork(UnitOfWork):
                     "INSERT INTO nodes "
                     "(id, parent_id, name, canonical_path, node_type, "
                     "content, summary, category_meta, stage, payload, tags, "
+                    "skeleton, name_editable, "
                     "is_archived, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,datetime('now'),"
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,datetime('now'),"
                     "datetime('now'))",
                     (
                         node.id,
@@ -64,6 +65,8 @@ class SQLiteUnitOfWork(UnitOfWork):
                         node.stage.value,
                         json.dumps(node.payload),
                         json.dumps(node.tags),
+                        1 if node.skeleton else 0,
+                        1 if node.name_editable else 0,
                         0,
                     ),
                 )
@@ -73,7 +76,7 @@ class SQLiteUnitOfWork(UnitOfWork):
                 cursor.execute(
                     "UPDATE nodes SET parent_id=?, name=?, canonical_path=?, "
                     "content=?, summary=?, category_meta=?, stage=?, "
-                    "payload=?, tags=?, "
+                    "payload=?, tags=?, skeleton=?, name_editable=?, "
                     "version=version+1, updated_at=datetime('now') WHERE id=?",
                     (
                         node.parent_id,
@@ -85,6 +88,8 @@ class SQLiteUnitOfWork(UnitOfWork):
                         node.stage.value,
                         json.dumps(node.payload),
                         json.dumps(node.tags),
+                        1 if node.skeleton else 0,
+                        1 if node.name_editable else 0,
                         node.id,
                     ),
                 )
@@ -107,7 +112,7 @@ class SQLiteUnitOfWork(UnitOfWork):
                 cursor.execute(
                     "UPDATE nodes SET is_archived=1, stage='archived', "
                     "updated_at=datetime('now') WHERE id=?",
-                    (node_id,),
+                    (node_id, ),
                 )
 
             self._recompute_paths(cursor)
@@ -159,10 +164,8 @@ class SQLiteUnitOfWork(UnitOfWork):
         This guarantees cascade path updates for descendants when a parent node
         is renamed or moved inside the same transaction.
         """
-        cursor.execute(
-            "SELECT id, parent_id, name, canonical_path "
-            "FROM nodes WHERE is_archived = 0"
-        )
+        cursor.execute("SELECT id, parent_id, name, canonical_path "
+                       "FROM nodes WHERE is_archived = 0")
         rows = cursor.fetchall()
         by_id = {row["id"]: row for row in rows}
         children: dict[str, set[str]] = defaultdict(set)
@@ -183,10 +186,8 @@ class SQLiteUnitOfWork(UnitOfWork):
             if cached is not None:
                 return cached
             if node_id in visiting:
-                raise ValueError(
-                    "Cycle detected while recomputing paths, "
-                    f"node_id={node_id}"
-                )
+                raise ValueError("Cycle detected while recomputing paths, "
+                                 f"node_id={node_id}")
             visiting.add(node_id)
             node = by_id[node_id]
             parent_id = node["parent_id"]
@@ -197,8 +198,7 @@ class SQLiteUnitOfWork(UnitOfWork):
                 if parent_id not in by_id:
                     raise ValueError(
                         "Orphan active node detected while recomputing paths: "
-                        f"node_id={node_id}, missing_parent_id={parent_id}"
-                    )
+                        f"node_id={node_id}, missing_parent_id={parent_id}")
                 parent_path = build_path(parent_id)
                 path = f"{parent_path}.{name}"
             visiting.remove(node_id)
@@ -247,8 +247,7 @@ class SQLiteUnitOfWork(UnitOfWork):
     def _refresh_projection(self, cursor: sqlite3.Cursor) -> None:
         cursor.execute("DELETE FROM node_paths")
         cursor.execute(
-            "SELECT id, canonical_path FROM nodes WHERE is_archived = 0"
-        )
+            "SELECT id, canonical_path FROM nodes WHERE is_archived = 0")
         for row in cursor.fetchall():
             path = row["canonical_path"]
             depth = 0 if path == "root" else path.count(".") + 1
