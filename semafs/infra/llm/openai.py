@@ -40,13 +40,21 @@ class OpenAIAdapter:
             resp = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {
+                        "role": "system",
+                        "content": system
+                    },
+                    {
+                        "role": "user",
+                        "content": user
+                    },
                 ],
                 tools=[tool],
                 tool_choice={
                     "type": "function",
-                    "function": {"name": "tree_ops"},
+                    "function": {
+                        "name": "tree_ops"
+                    },
                 },
             )
         except Exception as e:
@@ -88,13 +96,21 @@ class OpenAIAdapter:
             resp = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {
+                        "role": "system",
+                        "content": system
+                    },
+                    {
+                        "role": "user",
+                        "content": user
+                    },
                 ],
                 tools=[tool],
                 tool_choice={
                     "type": "function",
-                    "function": {"name": "route_placement"},
+                    "function": {
+                        "name": "route_placement"
+                    },
                 },
             )
         except Exception as e:
@@ -122,13 +138,21 @@ class OpenAIAdapter:
             resp = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {
+                        "role": "system",
+                        "content": system
+                    },
+                    {
+                        "role": "user",
+                        "content": user
+                    },
                 ],
                 tools=[tool],
                 tool_choice={
                     "type": "function",
-                    "function": {"name": "generate_summary"},
+                    "function": {
+                        "name": "generate_summary"
+                    },
                 },
             )
         except Exception as e:

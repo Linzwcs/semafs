@@ -6,7 +6,7 @@ from .llm import LLMAdapter
 from .placer import Placer
 from .summarizer import Summarizer
 from .bus import Bus, EventBus
-from .factory import UoWFactory, UnitOfWork
+from .factory import TxReader, UoWFactory, UnitOfWork
 from .propagation import Policy, Signal, Context, Step
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "Summarizer",
     "Bus",
     "EventBus",
+    "TxReader",
     "UoWFactory",
     "UnitOfWork",
     "Policy",

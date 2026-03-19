@@ -8,8 +8,35 @@ from .store import NodeStore
 
 
 @runtime_checkable
+class TxReader(Protocol):
+    """Transactional read interface bound to one database transaction."""
+
+    async def get_by_id(self, node_id: str) -> Node | None:
+        """Transactional read: get node by ID."""
+        ...
+
+    async def get_by_path(self, path: str) -> Node | None:
+        """Transactional read: get node by canonical path."""
+        ...
+
+    async def resolve_path(self, path: str) -> str | None:
+        """Transactional read: resolve path to node ID."""
+        ...
+
+    async def canonical_path(self, node_id: str) -> str | None:
+        """Transactional read: resolve node ID to canonical path."""
+        ...
+
+    async def list_children(self, node_id: str) -> list[Node]:
+        """Transactional read: list active children of node."""
+        ...
+
+
+@runtime_checkable
 class UnitOfWork(Protocol):
     """Unit of Work interface for transaction management."""
+
+    reader: TxReader
 
     def register_new(self, node: Node) -> None:
         """Stage new node for creation."""

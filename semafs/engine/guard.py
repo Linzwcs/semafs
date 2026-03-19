@@ -15,6 +15,7 @@ from ..core.rules import (
     CATEGORY_SEGMENT_RE,
     CATEGORY_UPDATED_NAME_RE,
     is_generic_category_name,
+    is_name_locked_node,
 )
 from ..core.snapshot import Snapshot
 
@@ -31,13 +32,6 @@ _STOPWORDS = {
     "and", "or", "the", "a", "an", "of", "to", "in", "on", "for",
     "with", "from", "by", "is", "are", "be", "this", "that",
 }
-
-
-def is_name_locked_node(node: Node) -> bool:
-    """Whether category node name is locked by policy."""
-    if node.node_type != NodeType.CATEGORY:
-        return False
-    return not node.name_editable
 
 
 class GuardRejectCode(str, Enum):

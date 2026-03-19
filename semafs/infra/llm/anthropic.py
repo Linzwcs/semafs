@@ -35,9 +35,15 @@ class AnthropicAdapter:
                 model=self._model,
                 max_tokens=1024,
                 system=system,
-                messages=[{"role": "user", "content": user}],
+                messages=[{
+                    "role": "user",
+                    "content": user
+                }],
                 tools=[_TREE_OPS_SCHEMA],
-                tool_choice={"type": "tool", "name": "tree_ops"},
+                tool_choice={
+                    "type": "tool",
+                    "name": "tree_ops"
+                },
             )
         except Exception as e:
             raise SemaFSError(f"Anthropic API call failed: {e}") from e
@@ -68,9 +74,15 @@ class AnthropicAdapter:
                 model=self._model,
                 max_tokens=512,
                 system=system,
-                messages=[{"role": "user", "content": user}],
+                messages=[{
+                    "role": "user",
+                    "content": user
+                }],
                 tools=[_PLACEMENT_SCHEMA],
-                tool_choice={"type": "tool", "name": "route_placement"},
+                tool_choice={
+                    "type": "tool",
+                    "name": "route_placement"
+                },
             )
         except Exception as e:
             raise SemaFSError(f"Anthropic placement call failed: {e}") from e
@@ -88,9 +100,15 @@ class AnthropicAdapter:
                 model=self._model,
                 max_tokens=512,
                 system=system,
-                messages=[{"role": "user", "content": user}],
+                messages=[{
+                    "role": "user",
+                    "content": user
+                }],
                 tools=[_SUMMARY_SCHEMA],
-                tool_choice={"type": "tool", "name": "generate_summary"},
+                tool_choice={
+                    "type": "tool",
+                    "name": "generate_summary"
+                },
             )
         except Exception as e:
             raise SemaFSError(f"Anthropic summary call failed: {e}") from e

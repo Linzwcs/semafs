@@ -64,17 +64,17 @@ class Intake:
 
         if not target_path:
             target_path = "root"
-        target_id = await self._store.resolve_path(target_path)
+        target_id = await uow.reader.resolve_path(target_path)
         if not target_id:
             raise ValueError(f"Target category not found: {target_path}")
-        parent_path = await self._store.canonical_path(target_id)
+        parent_path = await uow.reader.canonical_path(target_id)
         if not parent_path:
             raise ValueError(
                 f"Target category has no canonical path: {target_id}")
 
         # Generate placeholder name; semantic rename happens in maintenance.
         base_name = self._placeholder_name()
-        name = await self._ensure_unique_name(target_id, base_name)
+        name = await self._ensure_unique_name(uow, target_id, base_name)
 
         # Create pending leaf
         merged_payload = dict(payload or {})
@@ -111,8 +111,13 @@ class Intake:
 
         return WriteResult(leaf_id=leaf.id, placed=placed)
 
-    async def _ensure_unique_name(self, parent_id: str, base_name: str) -> str:
-        existing = await self._store.list_children(parent_id)
+    async def _ensure_unique_name(
+        self,
+        uow: UnitOfWork,
+        parent_id: str,
+        base_name: str,
+    ) -> str:
+        existing = await uow.reader.list_children(parent_id)
         names = {n.name for n in existing}
         return self._allocator.allocate_name(
             raw_name=base_name,

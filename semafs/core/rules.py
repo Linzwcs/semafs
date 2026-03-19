@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .node import Node
 
 CATEGORY_UPDATED_NAME_RE = re.compile(r"^[a-z]+$")
 CATEGORY_SEGMENT_RE = re.compile(r"^[a-z]+$")
@@ -104,3 +108,18 @@ def allocate_unique_category_segment(
             used_names.add(candidate)
             return candidate
         index += 1
+
+
+def is_name_locked_node(node: "Node") -> bool:
+    """
+    Whether category node name is locked by policy.
+
+    Moved from guard.py to core/rules.py to:
+    1. Eliminate infra -> engine reverse dependency
+    2. Make rule available to all layers
+    """
+    from .node import NodeType  # Local import to avoid circular dependency
+
+    if node.node_type != NodeType.CATEGORY:
+        return False
+    return not node.name_editable

@@ -16,7 +16,6 @@ from .ports.summarizer import Summarizer
 from .ports.propagation import Policy
 from .engine.keeper import Keeper
 from .engine.executor import Executor
-from .engine.guard import PlanGuard
 from .engine.resolver import Resolver
 from .engine.intake import Intake
 from .engine.pulse import Pulse
@@ -45,7 +44,6 @@ class SemaFS:
         self._budget = budget
 
         allocator = PathAllocator()
-        guard = PlanGuard()
         self._executor = Executor()
         self._resolver = Resolver(allocator=allocator)
         self._keeper = Keeper(
@@ -55,7 +53,6 @@ class SemaFS:
             strategy=strategy,
             executor=self._executor,
             resolver=self._resolver,
-            guard=guard,
             summarizer=summarizer,
             policy=policy,
             default_budget=budget,

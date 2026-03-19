@@ -3,10 +3,28 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager
 from collections import defaultdict
-from ....core.node import Node, NodeType
+from ....core.node import Node, NodeType, NodeStage
 from ....core.summary import normalize_category_meta, render_category_summary
-from ....ports.factory import UnitOfWork
+from ....ports.factory import TxReader, UnitOfWork
 from .store import SQLiteStore
+
+
+def _row_to_node(row: sqlite3.Row) -> Node:
+    return Node(
+        id=row["id"],
+        parent_id=row["parent_id"],
+        name=row["name"],
+        canonical_path=row["canonical_path"],
+        node_type=NodeType(row["node_type"]),
+        content=row["content"],
+        summary=row["summary"],
+        category_meta=json.loads(row["category_meta"] or "{}"),
+        payload=json.loads(row["payload"]),
+        tags=tuple(json.loads(row["tags"])),
+        stage=NodeStage(row["stage"]),
+        skeleton=bool(row["skeleton"]),
+        name_editable=bool(row["name_editable"]),
+    )
 
 
 class SQLiteUoWFactory:
@@ -33,12 +51,146 @@ class SQLiteUoWFactory:
                 raise
 
 
+class SQLiteTxReader(TxReader):
+    """Transactional reader bound to one SQLite connection."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._conn.row_factory = sqlite3.Row
+
+    async def get_by_id(self, node_id: str) -> Node | None:
+        return await asyncio.to_thread(self._get_by_id_sync, node_id)
+
+    def _get_by_id_sync(self, node_id: str) -> Node | None:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT * FROM nodes WHERE id = ? AND is_archived = 0",
+            (node_id,),
+        )
+        row = cursor.fetchone()
+        return _row_to_node(row) if row else None
+
+    async def get_by_path(self, path: str) -> Node | None:
+        node_id = await self.resolve_path(path)
+        if not node_id:
+            return None
+        return await self.get_by_id(node_id)
+
+    async def resolve_path(self, path: str) -> str | None:
+        return await asyncio.to_thread(self._resolve_path_sync, path)
+
+    def _resolve_path_sync(self, path: str) -> str | None:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT node_id FROM node_paths WHERE canonical_path = ?",
+            (path,),
+        )
+        row = cursor.fetchone()
+        return row["node_id"] if row else None
+
+    async def canonical_path(self, node_id: str) -> str | None:
+        return await asyncio.to_thread(self._canonical_path_sync, node_id)
+
+    def _canonical_path_sync(self, node_id: str) -> str | None:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT canonical_path FROM node_paths WHERE node_id = ?",
+            (node_id,),
+        )
+        row = cursor.fetchone()
+        return row["canonical_path"] if row else None
+
+    async def list_children(self, node_id: str) -> list[Node]:
+        return await asyncio.to_thread(self._list_children_sync, node_id)
+
+    def _list_children_sync(self, node_id: str) -> list[Node]:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM nodes
+            WHERE parent_id = ? AND is_archived = 0
+            ORDER BY node_type DESC, name ASC
+            """,
+            (node_id,),
+        )
+        return [_row_to_node(row) for row in cursor.fetchall()]
+
+    async def list_siblings(self, node_id: str) -> list[Node]:
+        return await asyncio.to_thread(self._list_siblings_sync, node_id)
+
+    def _list_siblings_sync(self, node_id: str) -> list[Node]:
+        cursor = self._conn.cursor()
+        # Get parent_id first
+        cursor.execute(
+            "SELECT parent_id FROM nodes WHERE id = ? AND is_archived = 0",
+            (node_id,),
+        )
+        row = cursor.fetchone()
+        if not row or not row["parent_id"]:
+            return []
+        parent_id = row["parent_id"]
+        # Get siblings (same parent, exclude self)
+        cursor.execute(
+            """
+            SELECT * FROM nodes
+            WHERE parent_id = ? AND id != ? AND is_archived = 0
+            ORDER BY node_type DESC, name ASC
+            """,
+            (parent_id, node_id),
+        )
+        return [_row_to_node(row) for row in cursor.fetchall()]
+
+    async def get_ancestors(
+        self,
+        node_id: str,
+        max_depth: int = 3,
+    ) -> list[Node]:
+        return await asyncio.to_thread(
+            self._get_ancestors_sync, node_id, max_depth
+        )
+
+    def _get_ancestors_sync(self, node_id: str, max_depth: int) -> list[Node]:
+        ancestors: list[Node] = []
+        current_id = node_id
+        cursor = self._conn.cursor()
+
+        for _ in range(max_depth):
+            cursor.execute(
+                "SELECT parent_id FROM nodes WHERE id = ? AND is_archived = 0",
+                (current_id,),
+            )
+            row = cursor.fetchone()
+            if not row or not row["parent_id"]:
+                break
+            parent_id = row["parent_id"]
+            cursor.execute(
+                "SELECT * FROM nodes WHERE id = ? AND is_archived = 0",
+                (parent_id,),
+            )
+            parent_row = cursor.fetchone()
+            if parent_row:
+                ancestors.append(_row_to_node(parent_row))
+            current_id = parent_id
+
+        return ancestors
+
+    async def all_paths(self) -> frozenset[str]:
+        return await asyncio.to_thread(self._all_paths_sync)
+
+    def _all_paths_sync(self) -> frozenset[str]:
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT canonical_path FROM node_paths")
+        return frozenset(row["canonical_path"] for row in cursor.fetchall())
+
+
+
 class SQLiteUnitOfWork(UnitOfWork):
     """SQLite-backed Unit of Work with shopping cart semantics."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
+        self.reader = SQLiteTxReader(conn)
         self._new: list[Node] = []
         self._dirty: list[Node] = []
         self._removed: list[str] = []
@@ -283,3 +435,4 @@ class SQLiteUnitOfWork(UnitOfWork):
                 """,
                 (row["id"], path, depth),
             )
+

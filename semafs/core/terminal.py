@@ -46,3 +46,33 @@ class TerminalConfig:
             raise ValueError("min_rollup_batch must be positive")
         if self.cold_retention_windows < 0:
             raise ValueError("cold_retention_windows must be non-negative")
+
+
+@dataclass(frozen=True)
+class TerminalPolicy:
+    """
+    Terminal category decision logic.
+
+    Encapsulates all terminal-related decisions, extracted from Keeper
+    to enable independent evolution and testing.
+    """
+
+    config: TerminalConfig
+
+    def is_terminal(self, depth: int) -> bool:
+        """Check if depth qualifies as terminal category."""
+        return depth >= self.config.terminal_depth
+
+    def allow_group(self, depth: int) -> bool:
+        """Check if grouping is allowed at this depth."""
+        if self.config.group_mode == TerminalGroupMode.DISABLED:
+            return False
+        return depth >= self.config.terminal_depth
+
+    def should_rollup(self, active_leaf_count: int) -> bool:
+        """Check if rollup should be triggered."""
+        return active_leaf_count >= self.config.rollup_trigger_count
+
+    def can_rollup_batch(self, batch_size: int) -> bool:
+        """Check if batch size meets minimum for rollup."""
+        return batch_size >= self.config.min_rollup_batch
