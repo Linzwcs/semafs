@@ -2,6 +2,8 @@
 
 from typing import Protocol, runtime_checkable
 
+from ..core.placement import PlacementRoute
+
 
 @runtime_checkable
 class Placer(Protocol):
@@ -18,4 +20,12 @@ class Placer(Protocol):
         Returns:
             Target category path
         """
+        ...
+
+    async def place_recursive(
+        self,
+        content: str,
+        start_path: str = "root",
+    ) -> PlacementRoute:
+        """Return recursive route trace for placement."""
         ...

@@ -8,7 +8,6 @@ from typing import Optional
 from .core.node import Node, NodePath, NodeType
 from .core.capacity import Budget
 from .core.naming import PathAllocator
-from .core.retrieval import RetrievalWeights, score_category_text
 from .core.terminal import TerminalConfig
 from .core.views import NodeView, TreeView, RelatedNodes, StatsView
 from .ports.store import NodeStore
@@ -202,45 +201,6 @@ class SemaFS:
             dirty_categories=0,
             top_categories=(),
         )
-
-    async def search_categories(
-        self,
-        query: str,
-        *,
-        limit: int = 10,
-        weights: RetrievalWeights | None = None,
-    ) -> list[tuple[str, float]]:
-        """
-        Search categories by hybrid keywords/summary scoring.
-
-        Returns:
-            list of (canonical_path, score), sorted by score desc.
-        """
-        all_ids = await self._store.all_node_ids()
-        if not all_ids:
-            return []
-        nodes = await asyncio.gather(
-            *[self._store.get_by_id(node_id) for node_id in all_ids]
-        )
-        scored: list[tuple[str, float]] = []
-        for node in nodes:
-            if not node or node.node_type != NodeType.CATEGORY:
-                continue
-            if node.path.value == "root":
-                continue
-            meta = node.category_meta or {}
-            raw_keywords = meta.get("keywords", [])
-            keywords = tuple(
-                str(v) for v in raw_keywords
-                if isinstance(v, str) and v.strip()
-            )
-            summary = str(meta.get("summary", node.summary or ""))
-            score = score_category_text(query, keywords, summary, weights)
-            if score <= 0:
-                continue
-            scored.append((node.path.value, score))
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return scored[:max(1, limit)]
 
     async def sweep(self, limit: int | None = None) -> int:
         """Scan overflow categories and reconcile them."""

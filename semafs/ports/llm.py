@@ -16,3 +16,18 @@ class LLMAdapter(Protocol):
         Returns raw LLM response as dict.
         """
         ...
+
+    async def call_summary(self, snapshot: Snapshot) -> dict:
+        """Call LLM for category summary generation."""
+        ...
+
+    async def call_placement(
+        self,
+        *,
+        content: str,
+        current_path: str,
+        current_summary: str,
+        children: tuple[dict[str, str], ...],
+    ) -> dict:
+        """Call LLM for one placement routing step."""
+        ...

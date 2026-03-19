@@ -17,3 +17,15 @@ class Summarizer(Protocol):
             New summary text
         """
         ...
+
+    async def summarize_with_keywords(
+        self,
+        snapshot: Snapshot,
+    ) -> tuple[str, tuple[str, ...] | None]:
+        """
+        Generate summary and optional keywords.
+
+        Returns:
+            (summary, keywords or None)
+        """
+        ...

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
@@ -24,10 +25,48 @@ from ..ports.bus import EventBus
 from ..ports.summarizer import Summarizer
 from ..ports.propagation import Policy, Signal, Context
 from .executor import Executor
-from .guard import PlanGuard
+from .guard import PlanGuard, GuardReport
 from .resolver import Resolver
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReconcileMetrics:
+    """Structured observability payload for one reconcile round."""
+
+    node_id: str
+    path: str
+    zone: str
+    allow_rebalance: bool
+    has_pending: bool
+    rebalance_attempted: bool = False
+    rebalance_applied: bool = False
+    lifecycle_promoted: int = 0
+    rollup_applied: bool = False
+    summary_changed: bool = False
+    propagated: bool = False
+    emitted_events: int = 0
+    guard_reject_total: int = 0
+    guard_reject_counts: dict[str, int] = field(default_factory=dict)
+
+    def as_log_payload(self) -> dict:
+        return {
+            "node_id": self.node_id,
+            "path": self.path,
+            "zone": self.zone,
+            "allow_rebalance": self.allow_rebalance,
+            "has_pending": self.has_pending,
+            "rebalance_attempted": self.rebalance_attempted,
+            "rebalance_applied": self.rebalance_applied,
+            "lifecycle_promoted": self.lifecycle_promoted,
+            "rollup_applied": self.rollup_applied,
+            "summary_changed": self.summary_changed,
+            "propagated": self.propagated,
+            "emitted_events": self.emitted_events,
+            "guard_reject_total": self.guard_reject_total,
+            "guard_reject_counts": self.guard_reject_counts,
+        }
 
 
 class Keeper:
@@ -71,132 +110,61 @@ class Keeper:
         emitted_events: list[TreeEvent] = []
         next_node_id: str | None = None
         next_signal: Signal | None = None
-        plan_summary_changed = False
-        plan_renamed_nodes = False
 
         lock = self._locks.setdefault(node_id, asyncio.Lock())
         async with lock:
             snapshot = await self._build_snapshot(node_id)
+            metrics = ReconcileMetrics(
+                node_id=node_id,
+                path=snapshot.target.path.value,
+                zone=snapshot.zone.name,
+                allow_rebalance=allow_rebalance,
+                has_pending=snapshot.has_pending,
+            )
             if snapshot.zone == Zone.HEALTHY and not snapshot.has_pending:
+                self._log_reconcile_metrics(metrics)
                 return False
 
-            # v2.1.4 rule: only origin hop can rebalance structure.
-            if allow_rebalance:
-                is_terminal = self._is_terminal(snapshot)
-                needs_rebalance = snapshot.has_pending or snapshot.zone in (
-                    Zone.PRESSURED,
-                    Zone.OVERFLOW,
-                )
-                if is_terminal and not self._allow_terminal_group(snapshot):
-                    needs_rebalance = False
-                if needs_rebalance:
-                    raw_plan = await self._strategy.draft(snapshot)
-                    if raw_plan:
-                        raw_plan = self._guard.validate_raw_plan(raw_plan)
-                        plan = self._resolver.compile(raw_plan, snapshot)
-                        plan = self._guard.validate_plan(plan)
-                        plan = self._guard.filter_ops_for_snapshot(
-                            plan, snapshot
-                        )
-                        if (not plan.is_empty() or plan.has_name_update()
-                                or plan.has_summary_update()
-                                or plan.has_keywords_update()):
-                            plan_renamed_nodes = any(
-                                isinstance(op, RenameOp) for op in plan.ops
-                            )
-                            async with self._uow_factory.begin() as uow:
-                                events = []
-                                if not plan.is_empty():
-                                    events = self._executor.execute(
-                                        plan, snapshot, uow)
-                                plan_summary_changed = (
-                                    self._apply_plan_category_updates(
-                                        plan, snapshot, uow
-                                    )
-                                )
-                                await uow.commit()
-                            emitted_events.extend(events)
-                            snapshot = await self._build_snapshot(node_id)
+            (
+                snapshot,
+                rebalance_events,
+                plan_summary_changed,
+                plan_renamed_nodes,
+            ) = await self._run_rebalance_phase(
+                snapshot,
+                allow_rebalance=allow_rebalance,
+                metrics=metrics,
+            )
+            emitted_events.extend(rebalance_events)
 
-            # Lifecycle management: pending is a queue stage, not a Plan op.
-            if snapshot.pending:
-                async with self._uow_factory.begin() as uow:
-                    persisted_events = self._promote_pending(snapshot, uow)
-                    await uow.commit()
-                emitted_events.extend(persisted_events)
-                snapshot = await self._build_snapshot(node_id)
+            snapshot, lifecycle_events = await self._run_lifecycle_phase(
+                snapshot
+            )
+            emitted_events.extend(lifecycle_events)
+            metrics.lifecycle_promoted = len(lifecycle_events)
 
-            if self._is_terminal(snapshot):
-                rollup_applied = await self._apply_terminal_rollup(snapshot)
-                if rollup_applied:
-                    snapshot = await self._build_snapshot(node_id)
+            snapshot, rollup_applied = await self._run_rollup_phase(snapshot)
+            metrics.rollup_applied = rollup_applied
 
-            summary_changed = False
-            if plan_summary_changed:
-                summary_changed = True
-            else:
-                raw_summary = await self._summarizer.summarize(snapshot)
-                meta, new_summary = self._build_snapshot_meta_and_summary(
-                    snapshot,
-                    raw_summary,
-                    None,
-                )
-                logger.debug(
-                    "category_meta keywords source=%s node=%s",
-                    meta.get("ext", {}).get("keyword_source"),
-                    snapshot.target.path.value,
-                )
-                summary_changed = self._summary_changed(
-                    snapshot.target.summary,
-                    new_summary,
-                )
-                meta_changed = snapshot.target.category_meta != meta
-                if summary_changed or meta_changed:
-                    async with self._uow_factory.begin() as uow:
-                        await self._update_summary(
-                            node_id,
-                            new_summary,
-                            meta,
-                            uow,
-                        )
-                        await uow.commit()
-                    snapshot = await self._build_snapshot(node_id)
+            snapshot, summary_changed = await self._run_summary_phase(
+                snapshot,
+                plan_summary_changed=plan_summary_changed,
+            )
+            metrics.summary_changed = summary_changed
 
-            # Cascade rename should still propagate upward even if summary text
-            # stays the same after recompute.
-            if not summary_changed and plan_renamed_nodes:
-                summary_changed = True
-
-            if summary_changed:
-                if snapshot.target.parent_id:
-                    parent = await self._store.get_by_id(
-                        snapshot.target.parent_id)
-                    if parent:
-                        ctx = Context(
-                            event=cause,
-                            from_path=snapshot.target.path.value,
-                            to_path=parent.path.value,
-                            signal=signal,
-                            snapshot=snapshot,
-                        )
-                        step = self._policy.step(ctx)
-                        logger.debug(
-                            "propagation: %s -> %s | signal=%.3f -> %.3f | "
-                            "depth=%d | continue=%s | reason=%s",
-                            ctx.from_path,
-                            ctx.to_path,
-                            signal.value,
-                            step.signal.value,
-                            step.signal.depth,
-                            step.should_continue,
-                            step.reason,
-                        )
-                        if step.should_continue:
-                            next_node_id = parent.id
-                            next_signal = step.signal
+            next_node_id, next_signal = await self._run_propagation_phase(
+                snapshot=snapshot,
+                signal=signal,
+                cause=cause,
+                summary_changed=summary_changed,
+                plan_renamed_nodes=plan_renamed_nodes,
+            )
+            metrics.propagated = bool(next_node_id and next_signal)
 
         if emitted_events:
             await self._publish_events(emitted_events)
+        metrics.emitted_events = len(emitted_events)
+        self._log_reconcile_metrics(metrics)
 
         if next_node_id and next_signal:
             await self.reconcile(
@@ -206,6 +174,222 @@ class Keeper:
                 allow_rebalance=False,
             )
         return True
+
+    async def _run_rebalance_phase(
+        self,
+        snapshot: Snapshot,
+        *,
+        allow_rebalance: bool,
+        metrics: ReconcileMetrics | None = None,
+    ) -> tuple[Snapshot, list[TreeEvent], bool, bool]:
+        """Run structure rebalance phase and plan-level meta updates."""
+        if not allow_rebalance:
+            return snapshot, [], False, False
+
+        if metrics is not None:
+            metrics.rebalance_attempted = True
+
+        is_terminal = self._is_terminal(snapshot)
+        needs_rebalance = snapshot.has_pending or snapshot.zone in (
+            Zone.PRESSURED,
+            Zone.OVERFLOW,
+        )
+        if is_terminal and not self._allow_terminal_group(snapshot):
+            needs_rebalance = False
+        if not needs_rebalance:
+            return snapshot, [], False, False
+
+        raw_plan = await self._strategy.draft(snapshot)
+        if not raw_plan:
+            return snapshot, [], False, False
+
+        raw_plan, raw_guard_report = self._guard.validate_raw_plan_with_report(
+            raw_plan
+        )
+        plan = self._resolver.compile(raw_plan, snapshot)
+        plan, resolved_guard_report = self._guard.validate_plan_with_report(
+            plan
+        )
+        plan, snapshot_guard_report = (
+            self._guard.filter_ops_for_snapshot_with_report(plan, snapshot)
+        )
+        guard_total, guard_counts = self._guard_metrics(
+            reports=(
+                raw_guard_report,
+                resolved_guard_report,
+                snapshot_guard_report,
+            ),
+        )
+        if metrics is not None:
+            metrics.guard_reject_total = guard_total
+            metrics.guard_reject_counts = guard_counts
+        self._log_guard_metrics(
+            path=snapshot.target.path.value,
+            total=guard_total,
+            counts=guard_counts,
+        )
+        if (
+            plan.is_empty()
+            and not plan.has_name_update()
+            and not plan.has_summary_update()
+            and not plan.has_keywords_update()
+        ):
+            return snapshot, [], False, False
+
+        plan_renamed_nodes = any(isinstance(op, RenameOp) for op in plan.ops)
+        async with self._uow_factory.begin() as uow:
+            events: list[TreeEvent] = []
+            if not plan.is_empty():
+                events = self._executor.execute(plan, snapshot, uow)
+            plan_summary_changed = self._apply_plan_category_updates(
+                plan, snapshot, uow
+            )
+            await uow.commit()
+        if metrics is not None:
+            metrics.rebalance_applied = True
+        refreshed = await self._build_snapshot(snapshot.target.id)
+        return refreshed, events, plan_summary_changed, plan_renamed_nodes
+
+    @staticmethod
+    def _guard_metrics(
+        *,
+        reports: tuple[GuardReport, ...],
+    ) -> tuple[int, dict[str, int]]:
+        total = sum(report.total_rejects for report in reports)
+        counts: dict[str, int] = {}
+        for report in reports:
+            for code, count in report.counts_by_code().items():
+                counts[code] = counts.get(code, 0) + count
+        return total, counts
+
+    @staticmethod
+    def _log_guard_metrics(
+        *,
+        path: str,
+        total: int,
+        counts: dict[str, int],
+    ) -> None:
+        if total == 0:
+            return
+        logger.debug(
+            "plan_guard_metrics path=%s total_rejects=%d counts=%s",
+            path,
+            total,
+            counts,
+        )
+
+    @staticmethod
+    def _log_reconcile_metrics(metrics: ReconcileMetrics) -> None:
+        logger.debug("reconcile_metrics %s", metrics.as_log_payload())
+
+    async def _run_lifecycle_phase(
+        self,
+        snapshot: Snapshot,
+    ) -> tuple[Snapshot, list[Persisted]]:
+        """Promote pending leaves into active stage."""
+        if not snapshot.pending:
+            return snapshot, []
+        async with self._uow_factory.begin() as uow:
+            persisted_events = self._promote_pending(snapshot, uow)
+            await uow.commit()
+        refreshed = await self._build_snapshot(snapshot.target.id)
+        return refreshed, persisted_events
+
+    async def _run_rollup_phase(
+        self,
+        snapshot: Snapshot,
+    ) -> tuple[Snapshot, bool]:
+        """Apply terminal rollup phase when needed."""
+        if not self._is_terminal(snapshot):
+            return snapshot, False
+        rollup_applied = await self._apply_terminal_rollup(snapshot)
+        if not rollup_applied:
+            return snapshot, False
+        return await self._build_snapshot(snapshot.target.id), True
+
+    async def _run_summary_phase(
+        self,
+        snapshot: Snapshot,
+        *,
+        plan_summary_changed: bool,
+    ) -> tuple[Snapshot, bool]:
+        """Refresh category summary/category_meta when needed."""
+        if plan_summary_changed:
+            return snapshot, True
+
+        raw_summary, llm_keywords = (
+            await self._summarizer.summarize_with_keywords(snapshot)
+        )
+        meta, new_summary = self._build_snapshot_meta_and_summary(
+            snapshot,
+            raw_summary,
+            llm_keywords,
+        )
+        logger.debug(
+            "category_meta keywords source=%s node=%s",
+            meta.get("ext", {}).get("keyword_source"),
+            snapshot.target.path.value,
+        )
+        summary_changed = self._summary_changed(
+            snapshot.target.summary,
+            new_summary,
+        )
+        meta_changed = snapshot.target.category_meta != meta
+        if not summary_changed and not meta_changed:
+            return snapshot, False
+
+        async with self._uow_factory.begin() as uow:
+            await self._update_summary(
+                snapshot.target.id,
+                new_summary,
+                meta,
+                uow,
+            )
+            await uow.commit()
+        refreshed = await self._build_snapshot(snapshot.target.id)
+        return refreshed, summary_changed
+
+    async def _run_propagation_phase(
+        self,
+        *,
+        snapshot: Snapshot,
+        signal: Signal,
+        cause: TreeEvent | None,
+        summary_changed: bool,
+        plan_renamed_nodes: bool,
+    ) -> tuple[str | None, Signal | None]:
+        """Decide upward propagation target after local reconcile."""
+        if not summary_changed and plan_renamed_nodes:
+            summary_changed = True
+        if not summary_changed or not snapshot.target.parent_id:
+            return None, None
+
+        parent = await self._store.get_by_id(snapshot.target.parent_id)
+        if not parent:
+            return None, None
+
+        ctx = Context(
+            event=cause,
+            from_path=snapshot.target.path.value,
+            to_path=parent.path.value,
+            signal=signal,
+            snapshot=snapshot,
+        )
+        step = self._policy.step(ctx)
+        logger.debug(
+            "propagation: %s -> %s | signal=%.3f -> %.3f | "
+            "depth=%d | continue=%s | reason=%s",
+            ctx.from_path,
+            ctx.to_path,
+            signal.value,
+            step.signal.value,
+            step.signal.depth,
+            step.should_continue,
+            step.reason,
+        )
+        if not step.should_continue:
+            return None, None
+        return parent.id, step.signal
 
     async def sweep_overloaded(self, limit: int | None = None) -> int:
         node_ids = await self._find_overloaded_nodes(limit=limit)
@@ -360,16 +544,69 @@ class Keeper:
             "active_raw_limit",
             self._terminal_config.active_raw_limit,
         )
+        placement = self._latest_placement_payload(snapshot)
+        if placement:
+            ext_payload["placement_source"] = str(
+                placement.get("source", "none")
+            )
+            ext_payload["placement_target"] = str(
+                placement.get("target_path", snapshot.target.path.value)
+            )
+            ext_payload["placement_reasoning"] = str(
+                placement.get("reasoning", "")
+            )[:200]
+            ext_payload["placement_confidence"] = (
+                self._placement_confidence(placement)
+            )
+        existing_keywords = tuple(
+            str(v).strip()
+            for v in snapshot.target.category_meta.get("keywords", [])
+            if isinstance(v, str) and str(v).strip()
+        )
+        effective_keywords = (
+            preferred_keywords
+            if preferred_keywords is not None
+            else existing_keywords
+        )
 
         meta = build_category_meta(
             raw_summary=raw_summary,
             leaf_texts=leaf_texts,
             child_names=child_names,
-            keywords=preferred_keywords,
+            keywords=effective_keywords if effective_keywords else None,
             ext=ext_payload,
         )
         normalized = normalize_category_meta(meta)
         return normalized, render_category_summary(normalized)
+
+    @staticmethod
+    def _latest_placement_payload(snapshot: Snapshot) -> dict | None:
+        candidates = sorted(
+            snapshot.pending + snapshot.leaves,
+            key=Keeper._leaf_order_key,
+            reverse=True,
+        )
+        for node in candidates:
+            payload = node.payload or {}
+            placement = payload.get("_placement")
+            if isinstance(placement, dict):
+                return placement
+        return None
+
+    @staticmethod
+    def _placement_confidence(placement: dict) -> float:
+        steps = placement.get("steps", [])
+        if isinstance(steps, list):
+            for step in reversed(steps):
+                if not isinstance(step, dict):
+                    continue
+                value = step.get("confidence")
+                try:
+                    conf = float(value)
+                except (TypeError, ValueError):
+                    continue
+                return min(1.0, max(0.0, conf))
+        return 0.0
 
     def _is_terminal(self, snapshot: Snapshot) -> bool:
         return self._is_terminal_node(snapshot.target)

@@ -24,6 +24,13 @@ class RuleSummarizer:
 
         return "; ".join(parts)[:500]
 
+    async def summarize_with_keywords(
+        self,
+        snapshot: Snapshot,
+    ) -> tuple[str, tuple[str, ...] | None]:
+        """Rule summarizer does not generate keywords."""
+        return await self.summarize(snapshot), None
+
 
 class LLMSummarizer:
     """LLM-powered summarizer — calls LLM to generate category summary."""
@@ -32,26 +39,35 @@ class LLMSummarizer:
         self._adapter = adapter
 
     async def summarize(self, snapshot: Snapshot) -> str:
+        """Compatibility wrapper returning summary only."""
+        summary, _ = await self.summarize_with_keywords(snapshot)
+        return summary
+
+    async def summarize_with_keywords(
+        self,
+        snapshot: Snapshot,
+    ) -> tuple[str, tuple[str, ...] | None]:
         """Generate summary via LLM call."""
-        parts = []
-        for leaf in snapshot.leaves + snapshot.pending:
-            if leaf.content:
-                parts.append(f"- {leaf.content[:150]}")
-        for sub in snapshot.subcategories:
-            if sub.summary:
-                parts.append(f"- [category] {sub.summary[:150]}")
+        has_context = bool(snapshot.leaves or snapshot.pending
+                           or snapshot.subcategories)
 
-        if not parts:
-            return snapshot.target.summary or ""
-
-        content = "\n".join(parts)
-        prompt = (f"Summarize the following items under category "
-                  f"'{snapshot.target.name}' in 1-2 sentences:\n{content}")
+        if not has_context:
+            return snapshot.target.summary or "", None
 
         try:
-            result = await self._adapter.call(snapshot)
-            return result.get("updated_content",
-                              "")[:500] or snapshot.target.summary or ""
+            result = await self._adapter.call_summary(snapshot)
+            summary = str(result.get("summary", "")).strip()
+            raw_keywords = result.get("keywords", [])
+            if isinstance(raw_keywords, list):
+                keywords = tuple(
+                    str(v).strip() for v in raw_keywords
+                    if isinstance(v, str) and str(v).strip())
+            else:
+                keywords = ()
+
+            if summary:
+                return summary[:500], (keywords or None)
+            return snapshot.target.summary or "", (keywords or None)
         except Exception:
-            # Fallback to rule-based
-            return "; ".join(p.lstrip("- ") for p in parts)[:500]
+            # Keep existing summary if LLM call fails.
+            return snapshot.target.summary or "", None

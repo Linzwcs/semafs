@@ -7,6 +7,27 @@ from ...core.node import Node
 from ...core.rules import GENERIC_CATEGORY_NAMES
 from ...core.snapshot import Snapshot
 
+KEYWORD_MIN_ITEMS = 2
+KEYWORD_MAX_ITEMS = 6
+SUMMARY_MAX_CHARS = 500
+SUMMARY_SENTENCE_RANGE = "1-3"
+GROUP_SUMMARY_SENTENCE_RANGE = "1-2"
+
+SUMMARY_CONTRACT_TEXT = (
+    f"{SUMMARY_SENTENCE_RANGE} concise sentences, plain text only, "
+    f"max {SUMMARY_MAX_CHARS} chars, no bullets/JSON."
+)
+GROUP_SUMMARY_CONTRACT_TEXT = (
+    "For GROUP: required category summary "
+    f"({GROUP_SUMMARY_SENTENCE_RANGE} sentences). For MERGE: merged content."
+)
+KEYWORD_CONTRACT_TEXT = (
+    f"Required semantic keywords for current category "
+    f"({KEYWORD_MIN_ITEMS}-{KEYWORD_MAX_ITEMS}). "
+    "No time tokens (e.g. 15:00), no system tokens "
+    "(e.g. leaf_xxx/rollup_xxx), no placeholders."
+)
+
 _TREE_OPS_SCHEMA = {
     "name": "tree_ops",
     "description": "Decide how to reorganize memory fragments in a directory.",
@@ -17,6 +38,7 @@ _TREE_OPS_SCHEMA = {
             "ops",
             "overall_reasoning",
             "updated_content",
+            "updated_keywords",
             "should_dirty_parent",
         ],
         "properties": {
@@ -45,7 +67,10 @@ _TREE_OPS_SCHEMA = {
                             "type": "string"
                         },
                         "content": {
-                            "type": "string"
+                            "type":
+                            "string",
+                            "description":
+                            GROUP_SUMMARY_CONTRACT_TEXT,
                         },
                         "path_to_move": {
                             "type": "string"
@@ -67,20 +92,76 @@ _TREE_OPS_SCHEMA = {
                 "type": "string"
             },
             "updated_content": {
-                "type": "string"
+                "type":
+                "string",
+                "description":
+                "Updated category summary. " + SUMMARY_CONTRACT_TEXT,
             },
             "updated_name": {
                 "type": "string"
             },
             "updated_keywords": {
-                "type": "array",
-                "items": {"type": "string"},
+                "type":
+                "array",
+                "items": {
+                    "type": "string"
+                },
+                "minItems":
+                KEYWORD_MIN_ITEMS,
+                "maxItems":
+                KEYWORD_MAX_ITEMS,
                 "description":
-                ("Semantic keywords for current category "
-                 "(2-6 concise terms)."),
+                KEYWORD_CONTRACT_TEXT,
             },
             "should_dirty_parent": {
                 "type": "boolean"
+            },
+        },
+    },
+}
+
+_PLACEMENT_SCHEMA = {
+    "name": "route_placement",
+    "description": "Decide whether to stay or descend for placement.",
+    "input_schema": {
+        "type": "object",
+        "required": ["action", "reasoning", "confidence"],
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["stay", "descend"],
+            },
+            "target_child": {
+                "type": "string",
+            },
+            "reasoning": {
+                "type": "string",
+            },
+            "confidence": {
+                "type": "number",
+            },
+        },
+    },
+}
+
+_SUMMARY_SCHEMA = {
+    "name": "generate_summary",
+    "description": "Generate concise category summary and keywords.",
+    "input_schema": {
+        "type": "object",
+        "required": ["summary", "keywords"],
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description":
+                ("1-3 concise sentences covering direct children."),
+            },
+            "keywords": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": KEYWORD_MIN_ITEMS,
+                "maxItems": KEYWORD_MAX_ITEMS,
+                "description": KEYWORD_CONTRACT_TEXT,
             },
         },
     },
@@ -174,10 +255,22 @@ def build_prompt(snapshot: Snapshot) -> Tuple[str, str]:
         "regex ^[a-z]+$.\n"
         "Names are RELATIVE to current dir.\n"
         "updated_content: rewrite directory summary after ops.\n"
-        "updated_keywords: provide 2-6 semantic keywords for current "
-        "category.\n"
+        "updated_content contract: 1-3 concise sentences, plain text only, "
+        f"max {SUMMARY_MAX_CHARS} chars, no markdown bullets, no JSON, "
+        "no field labels.\n"
+        "GROUP contract: each GROUP op must provide non-empty `content` as "
+        f"category summary ({GROUP_SUMMARY_SENTENCE_RANGE} concise "
+        "sentences).\n"
+        "updated_keywords contract: MUST provide "
+        f"{KEYWORD_MIN_ITEMS}-{KEYWORD_MAX_ITEMS} semantic keywords for "
+        "current category in every response.\n"
+        "Keyword guard: no time tokens (e.g. 15:00), no system tokens "
+        "(leaf_xxx/rollup_xxx), no generic placeholders.\n"
+        "If uncertain, derive keywords from major child themes.\n"
         "Summary contract: write 1-3 concise sentences that summarize all "
         "direct child content under the current category.\n"
+        "Never output operation schema text into updated_content "
+        "(e.g. op_type/ids/overall_reasoning/updated_keywords).\n"
         "should_dirty_parent: true if major new themes extracted.")
 
     status_warning = ""
@@ -212,3 +305,66 @@ def build_prompt(snapshot: Snapshot) -> Tuple[str, str]:
                     "Please call `tree_ops` with your reorganization plan.")
 
     return (system_prompt, user_content)
+
+
+def build_placement_prompt(
+    *,
+    content: str,
+    current_path: str,
+    current_summary: str,
+    children: tuple[dict[str, str], ...],
+) -> Tuple[str, str]:
+    """Build placement prompt for one recursive routing step."""
+    child_lines = []
+    for child in children:
+        child_lines.append(
+            f"- name: {child.get('name', '')} | "
+            f"path: {child.get('path', '')} | "
+            f"summary: {(child.get('summary', '') or '')[:140]}")
+    child_block = "\n".join(child_lines) if child_lines else "- (none)"
+
+    system = (
+        "You are a placement router for SemaFS.\n"
+        "Goal: choose whether new content should stay at current path "
+        "or descend into one existing child category.\n"
+        "Rules:\n"
+        "1) action=descend only when one child has clear semantic advantage.\n"
+        "2) target_child must be an existing child name/path.\n"
+        "3) confidence is 0.0~1.0.\n"
+        "4) If uncertain, choose stay.\n")
+    user = (f"<current>\npath: {current_path}\nsummary: {current_summary}\n"
+            "</current>\n\n"
+            f"<content>\n{content[:500]}\n</content>\n\n"
+            f"<children>\n{child_block}\n</children>\n\n"
+            "Please call `route_placement`.")
+    return system, user
+
+
+def build_summary_prompt(snapshot: Snapshot) -> Tuple[str, str]:
+    """Build summary-only prompt for category snapshot."""
+    items = []
+    for leaf in snapshot.leaves + snapshot.pending:
+        if leaf.content:
+            items.append(f"- [leaf] {leaf.content[:180]}")
+    for sub in snapshot.subcategories:
+        text = sub.summary or sub.name
+        items.append(f"- [category:{sub.name}] {text[:180]}")
+    item_block = "\n".join(items) if items else "- (empty)"
+
+    system = ("You summarize a category in SemaFS.\n"
+              "Return ONLY one tool call with fields "
+              "`summary` and `keywords`.\n"
+              "Rules:\n"
+              f"1) {SUMMARY_SENTENCE_RANGE} concise sentences.\n"
+              "2) Cover all major direct-child themes.\n"
+              "3) No bullet list, no markdown headings.\n"
+              f"4) Keep summary under {SUMMARY_MAX_CHARS} characters.\n"
+              "5) Provide "
+              f"{KEYWORD_MIN_ITEMS}-{KEYWORD_MAX_ITEMS} semantic keywords.\n"
+              "6) Keywords cannot be time/system/placeholder tokens.\n")
+    user = (f"<target>\npath: {snapshot.target.path.value}\n"
+            f"name: {snapshot.target.name}\n"
+            "</target>\n\n"
+            f"<children>\n{item_block}\n</children>\n\n"
+            "Please call `generate_summary`.")
+    return system, user

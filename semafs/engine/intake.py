@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from ..core.node import Node, NodeStage
+from ..core.placement import PlacementRoute
 from ..core.naming import PathAllocator
 from ..core.events import Placed
 from ..ports.factory import UnitOfWork
@@ -53,7 +54,21 @@ class Intake:
             Staged write result with event payload
         """
         # Determine target path and resolve to stable identity.
-        target_path = hint if hint else await self.placer.place(content, hint)
+        routed = hint is None
+        reasoning = None
+        route: PlacementRoute | None = None
+        if hint:
+            target_path = hint
+        else:
+            route = await self.placer.place_recursive(
+                content,
+                start_path="root",
+            )
+            target_path = route.target_path
+            reasoning = route.reasoning or None
+
+        if not target_path:
+            target_path = "root"
         target_id = await self._store.resolve_path(target_path)
         if not target_id:
             raise ValueError(f"Target category not found: {target_path}")
@@ -71,6 +86,11 @@ class Intake:
         merged_payload.setdefault(
             "_ingested_at",
             datetime.now(timezone.utc).isoformat(),
+        )
+        merged_payload["_placement"] = self._build_placement_payload(
+            hint=hint,
+            target_path=target_path,
+            route=route,
         )
         leaf = Node.create_leaf(
             parent_id=target_id,
@@ -90,8 +110,8 @@ class Intake:
             parent_id=target_id,
             leaf_path=leaf.path.value,
             parent_path=parent_path,
-            routed=hint is None,
-            reasoning=None,
+            routed=routed,
+            reasoning=reasoning,
         )
 
         return WriteResult(leaf_id=leaf.id, placed=placed)
@@ -108,3 +128,34 @@ class Intake:
     def _placeholder_name(self) -> str:
         """Build write-time stable placeholder name."""
         return f"leaf_{uuid4().hex[:6]}"
+
+    @staticmethod
+    def _build_placement_payload(
+        *,
+        hint: str | None,
+        target_path: str,
+        route: PlacementRoute | None,
+    ) -> dict:
+        if route is None:
+            return {
+                "source": "hint" if hint else "default",
+                "target_path": target_path,
+                "reasoning": "user hint" if hint else "default root route",
+                "steps": [],
+            }
+        steps = []
+        for step in route.steps[:10]:
+            steps.append({
+                "depth": step.depth,
+                "current_path": step.current_path,
+                "action": step.decision.action.value,
+                "target_child": step.decision.target_child,
+                "confidence": step.decision.confidence,
+                "reasoning": step.decision.reasoning,
+            })
+        return {
+            "source": "llm_recursive",
+            "target_path": route.target_path,
+            "reasoning": route.reasoning,
+            "steps": steps,
+        }

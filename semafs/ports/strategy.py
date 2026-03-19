@@ -17,11 +17,3 @@ class Strategy(Protocol):
         Returns None if no reorganization needed.
         """
         ...
-
-    def fallback(self, snapshot: Snapshot) -> RawPlan:
-        """
-        Create fallback plan (rule-based, no LLM).
-
-        Always returns a plan (may be empty).
-        """
-        ...

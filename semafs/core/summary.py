@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from typing import Any
 
-_EN_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_\\-]{2,}")
-_CJK_TOKEN_RE = re.compile(r"[\\u4e00-\\u9fff]{2,}")
 _LEAF_LIKE_RE = re.compile(r"^(leaf|rollup)_[0-9a-z_]+$")
 _TIME_LIKE_RE = re.compile(r"^\\d{1,2}:\\d{2}$")
 _MAX_SUMMARY_CHARS = 1200
 _MAX_KEYWORDS = 6
-
-_EN_STOPWORDS = {
-    "the", "and", "for", "that", "with", "from", "this", "are", "was",
-    "were", "have", "has", "had", "into", "about", "under", "over",
-    "work", "note", "notes", "todo", "task", "tasks", "item", "items",
+_STOPWORDS = {
+    "and", "or", "the", "a", "an", "of", "to", "in", "on", "for",
+    "with", "from", "by", "is", "are", "be", "this", "that",
 }
 
 
@@ -40,12 +35,8 @@ def build_category_meta(
         normalized_keywords = _normalize_keywords(keywords)
         keyword_source = "llm"
     else:
-        normalized_keywords = _extract_keywords(
-            summary,
-            leaf_texts,
-            child_names,
-        )
-        keyword_source = "rule"
+        normalized_keywords = ()
+        keyword_source = "none"
 
     ext_payload = dict(ext or {})
     ext_payload["keyword_source"] = keyword_source
@@ -71,7 +62,7 @@ def normalize_category_meta(meta: dict[str, Any] | None) -> dict[str, Any]:
     ext = source.get("ext", {})
     if not isinstance(ext, dict):
         ext = {}
-    ext.setdefault("keyword_source", "rule")
+    ext.setdefault("keyword_source", "none")
     return {
         "keywords": list(normalized_keywords),
         "summary": summary or "No summary available.",
@@ -120,30 +111,10 @@ def _normalize_keywords(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _extract_keywords(
-    summary: str,
-    leaf_texts: tuple[str, ...],
-    child_names: tuple[str, ...],
-) -> tuple[str, ...]:
-    counter: Counter[str] = Counter()
-    corpus = [summary, *leaf_texts, " ".join(child_names)]
-    for block in corpus:
-        text = (block or "").lower()
-        for token in _EN_TOKEN_RE.findall(text):
-            if token in _EN_STOPWORDS:
-                continue
-            if not _is_semantic_keyword(token):
-                continue
-            counter[token] += 1
-        for token in _CJK_TOKEN_RE.findall(text):
-            if not _is_semantic_keyword(token):
-                continue
-            counter[token] += 1
-    return tuple(token for token, _ in counter.most_common(_MAX_KEYWORDS))
-
-
 def _is_semantic_keyword(token: str) -> bool:
     if not token:
+        return False
+    if token in _STOPWORDS:
         return False
     if _TIME_LIKE_RE.fullmatch(token):
         return False

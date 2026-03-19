@@ -6,9 +6,14 @@ from .events import Merged, Grouped, Moved, Persisted, Placed
 from .ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
 from .raw import RawPlan, RawMerge, RawGroup, RawMove, RawRename
 from .snapshot import Snapshot
+from .placement import (
+    PlacementAction,
+    PlacementDecision,
+    PlacementStep,
+    PlacementRoute,
+)
 from .exceptions import SemaFSError, NodeNotFoundError, InvalidPathError
 from .rules import CATEGORY_UPDATED_NAME_RE, GENERIC_CATEGORY_NAMES
-from .retrieval import RetrievalWeights, score_category_text
 from .terminal import TerminalConfig, TerminalGroupMode
 from .summary import (
     build_category_meta,
@@ -39,10 +44,12 @@ __all__ = [
     "RawMove",
     "RawRename",
     "Snapshot",
+    "PlacementAction",
+    "PlacementDecision",
+    "PlacementStep",
+    "PlacementRoute",
     "CATEGORY_UPDATED_NAME_RE",
     "GENERIC_CATEGORY_NAMES",
-    "RetrievalWeights",
-    "score_category_text",
     "TerminalConfig",
     "TerminalGroupMode",
     "build_category_meta",
