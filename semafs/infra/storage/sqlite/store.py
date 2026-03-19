@@ -4,7 +4,8 @@ import asyncio
 import json
 import sqlite3
 import threading
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 from ....core.node import Node, NodeType, NodeStage
 from ....core.summary import normalize_category_meta, render_category_summary
@@ -20,11 +21,36 @@ class SQLiteStore(NodeStore):
         self._lock = threading.RLock()
 
     def _get_conn(self) -> sqlite3.Connection:
+        """Return the shared read connection, initialising schema on first use."""
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._ensure_schema(self._conn)
         return self._conn
+
+    @contextmanager
+    def write_conn(self) -> Iterator[sqlite3.Connection]:
+        """
+        Open a dedicated write connection for one transaction.
+
+        Each call opens a fresh connection and immediately acquires the write
+        lock via BEGIN IMMEDIATE, so concurrent write transactions are safely
+        serialised by SQLite itself.  The connection is always closed when the
+        context exits, regardless of success or failure.
+
+        Usage::
+
+            with store.write_conn() as conn:
+                conn.execute("INSERT ...")
+                conn.commit()   # or conn.rollback() on error
+        """
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+        finally:
+            conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         cursor = conn.cursor()

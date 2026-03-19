@@ -21,7 +21,7 @@ from ..core.events import TreeEvent, Persisted
 from ..ports.store import NodeStore
 from ..ports.factory import UoWFactory
 from ..ports.strategy import Strategy
-from ..ports.bus import EventBus
+from ..ports.bus import Bus
 from ..ports.summarizer import Summarizer
 from ..ports.propagation import Policy, Signal, Context
 from .executor import Executor
@@ -78,18 +78,18 @@ class Keeper:
     """Maintenance orchestrator (ID-first, summarize-only upward)."""
 
     def __init__(
-            self,
-            store: NodeStore,
-            uow_factory: UoWFactory,
-            bus: EventBus,
-            strategy: Strategy,
-            executor: Executor,
-            resolver: Resolver,
-            summarizer: Summarizer,
-            policy: Policy,
-            default_budget: Budget = Budget(),
-            terminal_config: TerminalConfig = TerminalConfig(),
-            guard: PlanGuard | None = None,
+        self,
+        store: NodeStore,
+        uow_factory: UoWFactory,
+        bus: Bus,
+        strategy: Strategy,
+        executor: Executor,
+        resolver: Resolver,
+        summarizer: Summarizer,
+        policy: Policy,
+        default_budget: Budget = Budget(),
+        terminal_config: TerminalConfig = TerminalConfig(),
+        guard: PlanGuard | None = None,
     ):
         self._store = store
         self._uow_factory = uow_factory
@@ -142,9 +142,7 @@ class Keeper:
             )
             emitted_events.extend(rebalance_events)
 
-            snapshot, lifecycle_events = await self._lifecycle_phase(
-                snapshot
-            )
+            snapshot, lifecycle_events = await self._lifecycle_phase(snapshot)
             emitted_events.extend(lifecycle_events)
             metrics.promoted = len(lifecycle_events)
 
@@ -211,16 +209,13 @@ class Keeper:
         raw_plan, raw_guard_report = self._guard.validate_raw_plan(raw_plan)
         plan = self._resolver.compile(raw_plan, snapshot)
         plan, resolved_guard_report = self._guard.validate_plan(plan)
-        plan, snapshot_guard_report = (
-            self._guard.filter_ops_for_snapshot(plan, snapshot)
-        )
-        guard_total, guard_counts = self._guard_metrics(
-            reports=(
-                raw_guard_report,
-                resolved_guard_report,
-                snapshot_guard_report,
-            ),
-        )
+        plan, snapshot_guard_report = (self._guard.filter_ops_for_snapshot(
+            plan, snapshot))
+        guard_total, guard_counts = self._guard_metrics(reports=(
+            raw_guard_report,
+            resolved_guard_report,
+            snapshot_guard_report,
+        ), )
         if metrics is not None:
             metrics.guard_rejects = guard_total
             metrics.guard_codes = guard_counts
@@ -229,25 +224,24 @@ class Keeper:
             total=guard_total,
             counts=guard_counts,
         )
-        if (
-            plan.is_empty()
-            and not plan.has_name_update()
-            and not plan.has_summary_update()
-            and not plan.has_keywords_update()
-        ):
+        if (plan.is_empty() and not plan.has_name_update()
+                and not plan.has_summary_update()
+                and not plan.has_keywords_update()):
             return snapshot, [], False, False
 
         plan_renamed_nodes = any(isinstance(op, RenameOp) for op in plan.ops)
+
         async with self._uow_factory.begin() as uow:
             events: list[TreeEvent] = []
             if not plan.is_empty():
                 events = self._executor.execute(plan, snapshot, uow)
             plan_summary_changed = self._apply_plan_category_updates(
-                plan, snapshot, uow
-            )
+                plan, snapshot, uow)
             await uow.commit()
+
         if metrics is not None:
             metrics.rebalance_done = True
+
         refreshed = await self._build_snapshot(snapshot.target.id)
         return refreshed, events, plan_summary_changed, plan_renamed_nodes
 
@@ -465,8 +459,7 @@ class Keeper:
                     parent_id=snapshot.target.id,
                     leaf_path=active.path.value,
                     parent_path=snapshot.target.path.value,
-                )
-            )
+                ))
         return events
 
     def _apply_plan_category_updates(
@@ -515,10 +508,8 @@ class Keeper:
                 meta.get("ext", {}).get("keyword_source"),
                 snapshot.target.path.value,
             )
-            if (
-                self._summary_changed(target.summary, normalized)
-                or target.category_meta != meta
-            ):
+            if (self._summary_changed(target.summary, normalized)
+                    or target.category_meta != meta):
                 updated = target.with_summary(normalized)
                 updated = updated.with_category_meta(meta)
                 uow.register_dirty(updated)
@@ -532,16 +523,14 @@ class Keeper:
         raw_summary: str | None,
         preferred_keywords: tuple[str, ...] | None,
     ) -> tuple[dict, str]:
-        leaf_texts = tuple(
-            n.content for n in (snapshot.leaves + snapshot.pending)
-            if n.content
-        )
+        leaf_texts = tuple(n.content
+                           for n in (snapshot.leaves + snapshot.pending)
+                           if n.content)
         child_names = tuple(n.name for n in snapshot.subcategories)
         ext_payload = dict(snapshot.target.category_meta.get("ext", {}))
-        ext_payload["terminal"] = (
-            snapshot.target.path.depth >= self._terminal_config.terminal_depth
-            or bool(ext_payload.get("terminal"))
-        )
+        ext_payload["terminal"] = (snapshot.target.path.depth
+                                   >= self._terminal_config.terminal_depth
+                                   or bool(ext_payload.get("terminal")))
         ext_payload.setdefault(
             "rollup_window",
             self._terminal_config.rollup_window,
@@ -553,27 +542,19 @@ class Keeper:
         placement = self._latest_placement_payload(snapshot)
         if placement:
             ext_payload["placement_source"] = str(
-                placement.get("source", "none")
-            )
+                placement.get("source", "none"))
             ext_payload["placement_target"] = str(
-                placement.get("target_path", snapshot.target.path.value)
-            )
+                placement.get("target_path", snapshot.target.path.value))
             ext_payload["placement_reasoning"] = str(
-                placement.get("reasoning", "")
-            )[:200]
+                placement.get("reasoning", ""))[:200]
             ext_payload["placement_confidence"] = (
-                self._placement_confidence(placement)
-            )
+                self._placement_confidence(placement))
         existing_keywords = tuple(
             str(v).strip()
             for v in snapshot.target.category_meta.get("keywords", [])
-            if isinstance(v, str) and str(v).strip()
-        )
-        effective_keywords = (
-            preferred_keywords
-            if preferred_keywords is not None
-            else existing_keywords
-        )
+            if isinstance(v, str) and str(v).strip())
+        effective_keywords = (preferred_keywords if preferred_keywords
+                              is not None else existing_keywords)
 
         meta = build_category_meta(
             raw_summary=raw_summary,
@@ -629,13 +610,10 @@ class Keeper:
         if self._terminal_config.group_mode != TerminalGroupMode.HIGH_GAIN:
             return False
         required_gain_count = snapshot.budget.hard + max(
-            2, snapshot.budget.soft // 2
-        )
-        return (
-            snapshot.zone == Zone.OVERFLOW
-            and snapshot.total_children >= required_gain_count
-            and len(snapshot.pending) >= 2
-        )
+            2, snapshot.budget.soft // 2)
+        return (snapshot.zone == Zone.OVERFLOW
+                and snapshot.total_children >= required_gain_count
+                and len(snapshot.pending) >= 2)
 
     async def _apply_terminal_rollup(self, snapshot: Snapshot) -> bool:
         """
@@ -656,10 +634,8 @@ class Keeper:
 
         batch = ordered[:overflow]
         rollup_content = self._build_rollup_content(batch, snapshot.target)
-        rollup_name = (
-            f"rollup_{self._terminal_config.rollup_window}_"
-            f"{uuid4().hex[:6]}"
-        )
+        rollup_name = (f"rollup_{self._terminal_config.rollup_window}_"
+                       f"{uuid4().hex[:6]}")
         rollup_leaf = Node.create_leaf(
             parent_id=snapshot.target.id,
             parent_path=snapshot.target.path.value,
@@ -695,10 +671,7 @@ class Keeper:
     def _leaf_order_key(node: Node) -> tuple[str, str]:
         payload = node.payload or {}
         stamp = str(
-            payload.get("_ingested_at")
-            or payload.get("ingested_at")
-            or ""
-        )
+            payload.get("_ingested_at") or payload.get("ingested_at") or "")
         return (stamp, node.name)
 
     @staticmethod
@@ -710,12 +683,10 @@ class Keeper:
                 continue
             snippets.append(f"- {text[:120]}")
         joined = "\n".join(snippets) if snippets else "- (empty batch)"
-        return (
-            f"Rollup for {target.path.value}\n"
-            f"items: {len(leaves)}\n"
-            f"window: auto-{datetime.utcnow().date().isoformat()}\n"
-            f"{joined}"
-        )[:2000]
+        return (f"Rollup for {target.path.value}\n"
+                f"items: {len(leaves)}\n"
+                f"window: auto-{datetime.utcnow().date().isoformat()}\n"
+                f"{joined}")[:2000]
 
     async def _scan_signal(self, node_id: str) -> Signal:
         origin = await self._store.canonical_path(node_id) or node_id

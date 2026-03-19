@@ -23,12 +23,12 @@ from semafs.engine.resolver import Resolver
 from semafs.infra.storage.sqlite.store import SQLiteStore
 from semafs.infra.storage.sqlite.uow import SQLiteUnitOfWork
 from semafs.semafs import SemaFS
-from semafs.infra.bus import InMemoryEventBus
+from semafs.infra.bus import InMemoryBus
 from semafs.algo.place import HintPlacer
 from semafs.algo.propagate import DefaultPolicy
 from semafs.algo.rebalance.sanitize import parse_raw_ops
 from semafs.infra.llm import prompt as prompt_module
-from semafs.infra.summarizer import RuleSummarizer
+from semafs.algo.summarize import RuleSummarizer
 
 
 class _UoWFactory:
@@ -465,7 +465,7 @@ async def _path_lookup_check() -> None:
     fs = SemaFS(
         store=store,
         uow_factory=factory,
-        bus=InMemoryEventBus(),
+        bus=InMemoryBus(),
         strategy=_NoopStrategy(),
         placer=HintPlacer(),
         summarizer=RuleSummarizer(),
@@ -512,7 +512,7 @@ async def _skeleton_lock_and_summary_check() -> None:
     fs = SemaFS(
         store=store,
         uow_factory=factory,
-        bus=InMemoryEventBus(),
+        bus=InMemoryBus(),
         strategy=_NoopStrategy(),
         placer=HintPlacer(),
         summarizer=RuleSummarizer(),

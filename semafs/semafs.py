@@ -2,7 +2,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
-
 from .core.node import Node, NodePath, NodeType, NodeStage
 from .core.capacity import Budget
 from .core.naming import PathAllocator
@@ -11,7 +10,7 @@ from .core.views import NodeView, TreeView, RelatedNodes, StatsView
 from .ports.store import NodeStore
 from .ports.factory import UoWFactory
 from .ports.strategy import Strategy
-from .ports.bus import EventBus
+from .ports.bus import Bus
 from .ports.placer import Placer
 from .ports.summarizer import Summarizer
 from .ports.propagation import Policy
@@ -32,7 +31,7 @@ class SemaFS:
             self,
             store: NodeStore,
             uow_factory: UoWFactory,
-            bus: EventBus,
+            bus: Bus,
             strategy: Strategy,
             placer: Placer,
             summarizer: Summarizer,
@@ -64,7 +63,6 @@ class SemaFS:
         )
         self._intake = Intake(placer=placer, store=store, allocator=allocator)
         self._pulse = Pulse(bus=bus, policy=policy, keeper=self._keeper)
-
         self._pulse.subscribe()
 
     async def write(

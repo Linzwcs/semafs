@@ -1,4 +1,4 @@
-"""EventBus - Event publishing protocol."""
+"""Bus - Event publishing protocol."""
 
 from typing import Protocol, runtime_checkable, Callable, Awaitable
 
@@ -6,7 +6,7 @@ from ..core.events import TreeEvent
 
 
 @runtime_checkable
-class EventBus(Protocol):
+class Bus(Protocol):
     """Event bus interface."""
 
     async def publish(self, event: TreeEvent) -> None:
@@ -20,3 +20,7 @@ class EventBus(Protocol):
     ) -> None:
         """Subscribe to event type with async handler."""
         ...
+
+
+# Backward-compatible alias while codebase migrates to Bus naming.
+EventBus = Bus

@@ -6,9 +6,10 @@ from ...core.placement import (
     PlacementRoute,
     PlacementStep,
 )
+from ...ports.placer import Placer
 
 
-class HintPlacer:
+class HintPlacer(Placer):
     """Use hint path directly, fallback to 'root'."""
 
     async def place(

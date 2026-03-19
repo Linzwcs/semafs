@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 
 from ...core.events import TreeEvent, Grouped, Merged, Moved, Persisted, Placed
-from ...ports.propagation import Signal, Context, Step
+from ...ports.propagation import Policy, Signal, Context, Step
 
 # Default event weights
 _DEFAULT_WEIGHTS: dict[type[TreeEvent], float] = {
@@ -16,7 +16,7 @@ _DEFAULT_WEIGHTS: dict[type[TreeEvent], float] = {
 
 
 @dataclass(frozen=True)
-class DefaultPolicy:
+class DefaultPolicy(Policy):
     """
     Baseline propagation policy with linear decay.
 

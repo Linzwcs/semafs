@@ -12,6 +12,7 @@ from ...core.placement import (
     PlacementStep,
 )
 from ...ports.llm import LLMAdapter
+from ...ports.placer import Placer
 from ...ports.store import NodeStore
 
 
@@ -23,7 +24,7 @@ class PlacementConfig:
     min_confidence: float = 0.55
 
 
-class LLMRecursivePlacer:
+class LLMRecursivePlacer(Placer):
     """Top-down recursive path routing driven by LLM."""
 
     def __init__(

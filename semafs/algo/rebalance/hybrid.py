@@ -6,12 +6,13 @@ import logging
 from ...core.capacity import Zone
 from ...core.raw import RawPlan
 from ...core.snapshot import Snapshot
+from ...ports.strategy import Strategy
 from .sanitize import parse_keywords, parse_raw_ops
 
 logger = logging.getLogger(__name__)
 
 
-class HybridStrategy:
+class HybridStrategy(Strategy):
     """LLM-first strategy without rule fallback."""
 
     def __init__(self, adapter, force_threshold: int | None = None):

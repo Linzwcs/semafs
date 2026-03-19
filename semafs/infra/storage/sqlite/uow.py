@@ -1,13 +1,36 @@
-"""SQLite implementation of UnitOfWork."""
-
 import asyncio
 import json
 import sqlite3
+from contextlib import asynccontextmanager
 from collections import defaultdict
-
 from ....core.node import Node, NodeType
 from ....core.summary import normalize_category_meta, render_category_summary
 from ....ports.factory import UnitOfWork
+from .store import SQLiteStore
+
+
+class SQLiteUoWFactory:
+    """Factory that opens an isolated write connection per transaction."""
+
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+
+    async def init(self) -> None:
+        await self.store.resolve_path("root")
+
+    @asynccontextmanager
+    async def begin(self):
+        """
+        Open a fresh write connection via store.write_conn() and hand it to
+        the UoW.  The connection is closed automatically when the block exits.
+        """
+        with self.store.write_conn() as conn:
+            uow = SQLiteUnitOfWork(conn)
+            try:
+                yield uow
+            except Exception:
+                await uow.rollback()
+                raise
 
 
 class SQLiteUnitOfWork(UnitOfWork):

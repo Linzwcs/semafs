@@ -7,7 +7,7 @@ from ...ports.propagation import Policy, Signal, Context, Step
 
 
 @dataclass
-class ZoneAwarePolicy:
+class ZoneAwarePolicy(Policy):
     """
     Decorator that boosts signal in overflow zones.
 
@@ -39,7 +39,7 @@ class ZoneAwarePolicy:
 
 
 @dataclass
-class DepthAwarePolicy:
+class DepthAwarePolicy(Policy):
     """
     Decorator that raises threshold with depth.
 

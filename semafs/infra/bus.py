@@ -1,15 +1,16 @@
-"""InMemoryEventBus - Simple in-process event bus."""
+"""InMemoryBus - Simple in-process event bus."""
 
 from typing import Callable, Awaitable
 
 from ..core.events import TreeEvent
 
 
-class InMemoryEventBus:
+class InMemoryBus:
     """Simple dict-based event bus for in-process pub/sub."""
 
     def __init__(self):
-        self._handlers: dict[type, list[Callable[[TreeEvent], Awaitable[None]]]] = {}
+        self._handlers: dict[type, list[Callable[[TreeEvent],
+                                                 Awaitable[None]]]] = {}
 
     async def publish(self, event: TreeEvent) -> None:
         """Publish event to all subscribers of its type."""
@@ -24,3 +25,7 @@ class InMemoryEventBus:
     ) -> None:
         """Register handler for event type."""
         self._handlers.setdefault(event_type, []).append(handler)
+
+
+# Backward-compatible alias while codebase migrates to shorter naming.
+InMemoryEventBus = InMemoryBus

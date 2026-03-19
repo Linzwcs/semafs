@@ -46,26 +46,21 @@ class Intake:
 
         Args:
             content: Content to write
-            hint: Optional path hint (if None, uses placer to route)
+            hint: Optional start path hint for subtree routing
             uow: Unit of Work for transaction
             payload: Optional metadata
 
         Returns:
             Staged write result with event payload
         """
-        # Determine target path and resolve to stable identity.
+        # Route from root by default; with hint, route inside hinted subtree.
         routed = hint is None
-        reasoning = None
-        route: PlacementRoute | None = None
-        if hint:
-            target_path = hint
-        else:
-            route = await self.placer.place(
-                content,
-                start_path="root",
-            )
-            target_path = route.target_path
-            reasoning = route.reasoning or None
+        route: PlacementRoute = await self.placer.place(
+            content,
+            start_path=hint or "root",
+        )
+        target_path = route.target_path
+        reasoning = route.reasoning or None
 
         if not target_path:
             target_path = "root"
@@ -153,8 +148,9 @@ class Intake:
                 "confidence": step.decision.confidence,
                 "reasoning": step.decision.reasoning,
             })
+        source = "hint_subtree" if hint else "llm_recursive"
         return {
-            "source": "llm_recursive",
+            "source": source,
             "target_path": route.target_path,
             "reasoning": route.reasoning,
             "steps": steps,

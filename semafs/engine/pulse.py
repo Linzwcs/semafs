@@ -1,7 +1,7 @@
 """Pulse - Event-driven signal propagation engine."""
 
 from ..core.events import TreeEvent, Merged, Grouped, Moved, Persisted, Placed
-from ..ports.bus import EventBus
+from ..ports.bus import Bus
 from ..ports.propagation import Policy
 
 
@@ -18,7 +18,7 @@ class Pulse:
     No decay constants, no threshold logic — that's Policy's job.
     """
 
-    def __init__(self, bus: EventBus, policy: Policy, keeper):
+    def __init__(self, bus: Bus, policy: Policy, keeper):
         self._bus = bus
         self._policy = policy
         self._keeper = keeper
