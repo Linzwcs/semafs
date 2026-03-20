@@ -5,21 +5,34 @@ export default withMermaid(
   defineConfig({
     title: 'SemaFS',
     description: 'Semantic Filesystem for LLM Memory',
+    base: '/semafs/',
 
     head: [
-      ['style', {}, `
-        :root {
-          --vp-home-hero-name-color: transparent;
-          --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #3eaf7c 30%, #42b983);
-          --vp-home-hero-image-background-image: linear-gradient(-45deg, #3eaf7c50 50%, #42b98350 50%);
-          --vp-home-hero-image-filter: blur(40px);
-        }
-      `],
       ['link', { rel: 'icon', href: '/logo.svg' }],
-      ['meta', { name: 'theme-color', content: '#3eaf7c' }],
+      ['meta', { name: 'theme-color', content: '#0d9488' }],
       ['meta', { name: 'og:type', content: 'website' }],
-      ['meta', { name: 'og:title', content: 'SemaFS - Semantic Filesystem for LLM Memory' }],
-      ['meta', { name: 'og:description', content: 'Give your LLM a persistent, self-organizing memory that grows smarter over time.' }],
+      ['meta', { name: 'og:title', content: 'SemaFS Documentation' }],
+      [
+        'meta',
+        {
+          name: 'og:description',
+          content:
+            'Architecture-first documentation for SemaFS: semantic tree memory with event-driven maintenance.',
+        },
+      ],
+      [
+        'style',
+        {},
+        `
+        :root {
+          --vp-c-brand-1: #0d9488;
+          --vp-c-brand-2: #0f766e;
+          --vp-c-brand-3: #115e59;
+          --vp-home-hero-name-color: transparent;
+          --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #0d9488 30%, #14b8a6);
+        }
+      `,
+      ],
     ],
 
     themeConfig: {
@@ -27,15 +40,15 @@ export default withMermaid(
 
       nav: [
         { text: 'Guide', link: '/guide/introduction' },
-        { text: 'API', link: '/api/semafs' },
-        { text: 'Design', link: '/design/architecture' },
+        { text: 'Architecture', link: '/design/architecture' },
+        { text: 'API Reference', link: '/api/semafs' },
         {
           text: 'Resources',
           items: [
-            { text: 'Paper', link: '/paper' },
-            { text: 'Changelog', link: 'https://github.com/linzwcs/semafs/releases' }
-          ]
-        }
+            { text: 'GitHub', link: 'https://github.com/linzwcs/semafs' },
+            { text: 'Development History', link: '/dev_history/semafs_v2_architecture' },
+          ],
+        },
       ],
 
       sidebar: {
@@ -44,80 +57,81 @@ export default withMermaid(
             text: 'Getting Started',
             items: [
               { text: 'Introduction', link: '/guide/introduction' },
-              { text: 'Value & Benchmark', link: '/guide/value-benchmark' },
               { text: 'Quick Start', link: '/guide/quickstart' },
+              { text: 'Value and Limits', link: '/guide/value-benchmark' },
               { text: 'Core Concepts', link: '/guide/concepts' },
-            ]
+            ],
           },
           {
             text: 'Usage',
             items: [
-              { text: 'Writing Memories', link: '/guide/writing' },
-              { text: 'Reading & Querying', link: '/guide/reading' },
+              { text: 'Writing', link: '/guide/writing' },
+              { text: 'Reading and Querying', link: '/guide/reading' },
               { text: 'Maintenance', link: '/guide/maintenance' },
               { text: 'LLM Integration', link: '/guide/llm-integration' },
-              { text: 'Agent Memory', link: '/guide/agent-memory' },
-            ]
+              { text: 'Agent Memory (MCP)', link: '/guide/agent-memory' },
+            ],
           },
           {
             text: 'Advanced',
             items: [
-              { text: 'Tree Operations', link: '/guide/operations' },
+              { text: 'Operation Pipeline', link: '/guide/operations' },
               { text: 'Strategies', link: '/guide/strategies' },
-              { text: 'Transactions', link: '/guide/transactions' },
-            ]
-          }
+              { text: 'Transactions and Consistency', link: '/guide/transactions' },
+              { text: 'Deployment (GitHub Pages)', link: '/guide/deployment' },
+            ],
+          },
         ],
-        '/api/': [
-          {
-            text: 'API Reference',
-            items: [
-              { text: 'SemaFS', link: '/api/semafs' },
-              { text: 'TreeNode', link: '/api/node' },
-              { text: 'Operations', link: '/api/operations' },
-              { text: 'Views', link: '/api/views' },
-              { text: 'Strategy', link: '/api/strategy' },
-              { text: 'Repository', link: '/api/repository' },
-            ]
-          }
-        ],
+
         '/design/': [
           {
             text: 'System Design',
             items: [
               { text: 'Design Philosophy', link: '/design/philosophy' },
-              { text: 'ADR Records', link: '/design/adr' },
-              { text: 'Architecture', link: '/design/architecture' },
+              { text: 'Architecture Overview', link: '/design/architecture' },
               { text: 'Data Model', link: '/design/data-model' },
-              { text: 'Maintenance System', link: '/design/maintenance' },
+              { text: 'Maintenance Pipeline', link: '/design/maintenance' },
               { text: 'Transaction Model', link: '/design/transactions' },
+              { text: 'ADR Records', link: '/design/adr' },
               { text: 'Evolution Roadmap', link: '/design/evolution' },
-            ]
-          }
-        ]
+            ],
+          },
+        ],
+
+        '/api/': [
+          {
+            text: 'API Reference',
+            items: [
+              { text: 'SemaFS Facade', link: '/api/semafs' },
+              { text: 'Node and Path Model', link: '/api/node' },
+              { text: 'Operations and Plans', link: '/api/operations' },
+              { text: 'Storage and Unit of Work', link: '/api/repository' },
+              { text: 'Strategies and Adapters', link: '/api/strategy' },
+              { text: 'View Objects', link: '/api/views' },
+            ],
+          },
+        ],
       },
 
-      socialLinks: [
-        { icon: 'github', link: 'https://github.com/linzwcs/semafs' }
-      ],
+      socialLinks: [{ icon: 'github', link: 'https://github.com/linzwcs/semafs' }],
 
       footer: {
         message: 'Released under the MIT License.',
-        copyright: 'Copyright © 2024-present'
+        copyright: 'Copyright © 2024-present SemaFS Contributors',
       },
 
       search: {
-        provider: 'local'
+        provider: 'local',
       },
 
       editLink: {
         pattern: 'https://github.com/linzwcs/semafs/edit/main/docs/:path',
-        text: 'Edit this page on GitHub'
-      }
+        text: 'Edit this page on GitHub',
+      },
     },
 
     markdown: {
-      lineNumbers: true
-    }
+      lineNumbers: true,
+    },
   })
 )
