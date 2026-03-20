@@ -1,94 +1,53 @@
-# Reading & Querying
+# Reading and Querying
 
-Retrieve and navigate memory with the latest read APIs.
+Read APIs are side-effect free and do not mutate tree structure.
 
-## Read Surface
-
-| Method | Returns | Purpose |
-|---|---|---|
-| `read(path)` | `NodeView \| None` | Single node + navigation context |
-| `list(path)` | `list[NodeView]` | Direct children |
-| `tree(path, max_depth)` | `TreeView \| None` | Recursive tree view |
-| `related(path)` | `RelatedNodes \| None` | Parent/siblings/children/ancestors |
-| `stats()` | `StatsView` | Global statistics |
-
-## `read(path)`
+## 1. Python Query Surface
 
 ```python
-view = await semafs.read("root.preferences")
-if view:
-    print(view.path)
-    print(view.breadcrumb)
-    print(view.child_count)
+node = await fs.read("root.work")
+children = await fs.list("root.work")
+tree = await fs.tree("root", max_depth=3)
+related = await fs.related("root.work")
+stats = await fs.stats()
 ```
 
-## `list(path)`
+Return types:
 
-```python
-children = await semafs.list("root")
-for child in children:
-    print(child.path, child.summary)
+- `read` -> `NodeView | None`
+- `list` -> `list[NodeView]`
+- `tree` -> `TreeView | None`
+- `related` -> `RelatedNodes | None`
+- `stats` -> `StatsView`
+
+## 2. CLI Query Surface
+
+```bash
+semafs read root.work --provider openai --db data/demo.db
+semafs list root.work --provider openai --db data/demo.db
+semafs tree root --provider openai --db data/demo.db --max-depth 3
+semafs stats --provider openai --db data/demo.db --output json
 ```
 
-## `tree(path, max_depth)`
+## 3. Query Semantics
 
-```python
-tree = await semafs.tree("root", max_depth=3)
-if tree:
-    print(tree.total_nodes)
-    print(tree.leaf_count)
-```
+- `read(path)`: one node plus navigation counters
+- `list(path)`: direct children only (non-recursive)
+- `tree(path,max_depth)`: recursive tree expansion
+- `related(path)`: parent/siblings/children/ancestors neighborhood
+- `stats()`: aggregate topology and maintenance pressure view
 
-## `related(path)`
+## 4. JSON Rendering
 
-```python
-rel = await semafs.related("root.preferences")
-if rel:
-    print("current:", rel.current.path)
-    print("siblings:", [n.path for n in rel.siblings])
-    print("children:", [n.path for n in rel.children])
-```
+For automation and integration:
 
-## `stats()`
+- `read/tree/stats` support JSON output via CLI
+- MCP tools return structured dictionaries
 
-```python
-stats = await semafs.stats()
-print(stats.total_nodes)
-print(stats.total_categories)
-print(stats.total_leaves)
-print(stats.max_depth)
-print(stats.dirty_categories)
-print(stats.top_categories)
-```
+## 5. Viewer Query Features
 
-## Rendering
+`semafs view` adds:
 
-```python
-from semafs.renderer import TextRenderer, JSONRenderer
-
-view = await semafs.read("root")
-if view:
-    print(TextRenderer.render_node(view))
-
-tr = await semafs.tree("root", max_depth=2)
-if tr:
-    print(JSONRenderer.render_tree(tr))
-```
-
-## Current vs Old API
-
-Use now:
-
-- `tree(...)`
-- `related(...)`
-
-Do not use old names:
-
-- `view_tree(...)`
-- `get_related(...)`
-
-## Next Steps
-
-- [Writing Memories](./writing) - Append new fragments
-- [Maintenance](./maintenance) - Keep structure healthy
-- [API Reference](/api/semafs) - Full method signatures
+- full-text-like `LIKE` search over `name/content/summary`
+- paginated child browsing
+- ancestor chain endpoint for breadcrumbs

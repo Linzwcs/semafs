@@ -1,7 +1,7 @@
 # VitePress build output
 .vitepress/dist
 .vitepress/cache
-
+.history/*
 # Dependencies
 node_modules
 

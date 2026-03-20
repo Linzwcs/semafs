@@ -1,82 +1,47 @@
 # Strategies
 
-Configure how SemaFS drafts rebalance plans.
+SemaFS uses protocol-based strategy injection.
 
-## Current Strategy Interface
+## 1. Protocol Interfaces
 
-```python
-class Strategy(Protocol):
-    async def draft(self, snapshot: Snapshot) -> RawPlan | None: ...
-```
+- `Strategy.draft(snapshot) -> RawPlan | None`
+- `Placer.place(content, start_path) -> PlacementRoute`
+- `Summarizer.summarize(snapshot) -> (summary, keywords?)`
+- `Policy.seed/step` for propagation
 
-- Return `None` when no structural changes are needed.
-- Return `RawPlan` when you want rebalance ops (`MERGE/GROUP/MOVE/RENAME`).
+## 2. Default Runtime Stack
 
-## Built-in Strategy
+- Rebalance strategy: `HybridStrategy`
+- Placement strategy: `LLMRecursivePlacer`
+- Summarization strategy: `LLMSummarizer`
+- Propagation policy: `DefaultPolicy`
 
-SemaFS currently ships with:
+## 3. HybridStrategy Behavior
 
-- `HybridStrategy(adapter, force_threshold=None)`
+- healthy + no pending -> no plan
+- healthy + pending -> usually no structural ops
+- pressured/overflow -> call LLM and parse ops
+- LLM failure -> skip rebalancing this round
 
-```python
-from semafs.algo import HybridStrategy
+## 4. Placement Strategy Variants
 
-strategy = HybridStrategy(adapter)
-```
+- `HintPlacer`: always stays at start path
+- `LLMRecursivePlacer`: decides stay/descend per level
 
-## HybridStrategy Behavior
+Main config knobs:
 
-High-level logic:
+- `max_depth`
+- `min_confidence`
 
-- healthy + no pending => skip
-- healthy + pending => skip structural rebalance (lifecycle/summary still run)
-- pressured/overflow => call LLM adapter and parse plan
-- LLM failure => skip rebalance this round (safe no-op)
+## 5. Policy Decorators
 
-## Custom Strategy Example
+Additional propagation decorators are available:
 
-```python
-from semafs.core.raw import RawPlan, RawRename
+- `ZoneAwarePolicy`
+- `DepthAwarePolicy`
 
+They wrap a base policy and alter continuation behavior.
 
-class NoopStrategy:
-    async def draft(self, snapshot):
-        return None
+## 6. Custom Strategy Pattern
 
-
-class RenameOnlyStrategy:
-    async def draft(self, snapshot):
-        if not snapshot.subcategories:
-            return None
-        first = snapshot.subcategories[0]
-        return RawPlan(
-            ops=(
-                RawRename(node_id=first.id, new_name="renamed_category"),
-            ),
-            reasoning="rename first subcategory",
-        )
-```
-
-## Choosing a Strategy
-
-- local/offline deterministic flow: custom no-op or rule strategy
-- production semantic organization: `HybridStrategy` + LLM adapter
-- strict governance: custom strategy + stronger guard constraints
-
-## Current vs Old Docs
-
-Use now:
-
-- `Strategy.draft(snapshot)`
-- `HybridStrategy`
-
-Old names to avoid:
-
-- `create_plan(...)`
-- `RuleOnlyStrategy`
-
-## Next Steps
-
-- [LLM Integration](./llm-integration) - Adapter setup
-- [Maintenance](./maintenance) - Reconcile and sweep behavior
-- [Operations](./operations) - Plan operation semantics
+Any class implementing protocol signatures can be injected into `SemaFS(...)`.

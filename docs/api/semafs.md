@@ -1,8 +1,8 @@
-# SemaFS API
+# SemaFS Facade API
 
-`SemaFS` 是对外主入口，负责写入、维护、读取与骨架初始化。
+`SemaFS` is the main asynchronous facade, defined in `semafs/semafs.py`.
 
-## Constructor
+## 1. Constructor
 
 ```python
 SemaFS(
@@ -18,85 +18,61 @@ SemaFS(
 )
 ```
 
-## Write & Maintenance
+Dependency roles:
 
-### `write()`
+- storage: `store`, `uow_factory`
+- eventing: `bus`
+- decision stack: `strategy`, `placer`, `summarizer`, `policy`
+- limits/config: `budget`, `terminal_config`
 
-```python
-async def write(
-    content: str,
-    hint: str | None = None,
-    payload: dict | None = None,
-) -> str
-```
+## 2. Methods
 
-- 写入新片段并返回叶子节点 `id`。
-- `hint` 是写入入口路径，最终落点由 `placer` 决定。
+### 2.1 `write(content, hint=None, payload=None) -> str`
 
-### `sweep()`
+- stages pending leaf in transaction
+- commits transaction
+- publishes `Placed` event
+- returns leaf id
 
-```python
-async def sweep(limit: int | None = None) -> int
-```
+### 2.2 `read(path) -> NodeView | None`
 
-- 扫描并处理超载分类，返回本轮处理分类数。
+Returns one node with breadcrumb and local counters.
 
-### `apply_skeleton()`
+### 2.3 `list(path) -> list[NodeView]`
 
-```python
-async def apply_skeleton(
-    skeleton: dict | list[str] | tuple[str, ...] | str,
-    *,
-    source: str = "manual",
-) -> int
-```
+Returns direct children views (sorted by path).
 
-- 批量创建/标记骨架分类。
-- 骨架分类会被设置为 `skeleton=True` 且 `name_editable=False`。
-- 返回新增/更新的节点数。
+### 2.4 `tree(path='root', max_depth=3) -> TreeView | None`
 
-## Read APIs
+Returns recursive tree snapshot.
 
-### `read(path)`
+### 2.5 `related(path) -> RelatedNodes | None`
 
-```python
-async def read(path: str) -> NodeView | None
-```
+Returns parent/sibling/child/ancestor neighborhood.
 
-### `list(path)`
+### 2.6 `stats() -> StatsView`
 
-```python
-async def list(path: str) -> list[NodeView]
-```
+Returns aggregate topology and maintenance indicators.
 
-### `tree(path="root", max_depth=3)`
+### 2.7 `sweep(limit=None) -> int`
 
-```python
-async def tree(path: str = "root", max_depth: int = 3) -> TreeView | None
-```
+Runs overload scan + reconcile; returns processed category count.
 
-### `related(path)`
+### 2.8 `apply_skeleton(skeleton, source='manual') -> int`
 
-```python
-async def related(path: str) -> RelatedNodes | None
-```
+Creates/updates skeleton categories and locks names.
 
-### `stats()`
+Supported inputs:
 
-```python
-async def stats() -> StatsView
-```
+- string path
+- list/tuple of paths
+- nested dictionary tree
 
-返回统计项包括：
+## 3. Error Surface
 
-- `total_categories`
-- `total_leaves`
-- `max_depth`
-- `dirty_categories`
-- `top_categories`
+Common failure categories:
 
-## Notes
-
-- 当前主维护入口是 `sweep()`（没有 `maintain()`）。
-- 当前树读取入口是 `tree()`（没有 `view_tree()`）。
-- 当前邻接读取入口是 `related()`（没有 `get_related()`）。
+- invalid path format
+- missing target category
+- skeleton conflicts with existing leaf path
+- provider/runtime errors from adapters

@@ -154,6 +154,27 @@ class NodeDB:
         return ancestors
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
+        keywords: list[str] = []
+        if row["node_type"] == "category":
+            category_meta_raw = row["category_meta"] if "category_meta" in row.keys(
+            ) else "{}"
+            try:
+                category_meta = json.loads(category_meta_raw or "{}")
+            except json.JSONDecodeError:
+                category_meta = {}
+
+            raw_keywords = category_meta.get("keywords", [])
+            if isinstance(raw_keywords, (list, tuple)):
+                seen: set[str] = set()
+                normalized: list[str] = []
+                for value in raw_keywords:
+                    token = str(value).strip()
+                    if not token or token in seen:
+                        continue
+                    seen.add(token)
+                    normalized.append(token)
+                keywords = normalized
+
         return {
             "id": row["id"],
             "parent_id": row["parent_id"],
@@ -162,6 +183,7 @@ class NodeDB:
             "type": row["node_type"],
             "stage": row["stage"],
             "content": row["content"] or row["summary"] or "",
+            "keywords": keywords,
             "tags": json.loads(row["tags"] or "[]"),
             "skeleton": bool(row["skeleton"]),
         }
@@ -408,6 +430,21 @@ HTML_PAGE = """
             border-radius: 999px;
             padding: 0.22rem 0.55rem;
         }
+        .keyword-chip {
+            background: #edf4ff;
+            border: 1px solid #cfdbf3;
+            color: #37506f;
+            font-size: 0.72rem;
+            border-radius: 999px;
+            padding: 0.16rem 0.5rem;
+            line-height: 1.15rem;
+            white-space: nowrap;
+        }
+        .keyword-chip-muted {
+            background: #f2f4f1;
+            border: 1px solid #d7ddd4;
+            color: #708070;
+        }
         .item-row {
             border: 1px solid var(--line);
             border-radius: 12px;
@@ -529,6 +566,15 @@ HTML_PAGE = """
                                 <span class="text-xs path-text mono">{{ item.path }}</span>
                             </div>
                             <p class="text-sm path-text mt-1 content-preview">{{ item.content }}</p>
+                            <div v-if="item.type === 'category'" class="flex flex-wrap gap-1 mt-2">
+                                <span
+                                    v-if="item.keywords?.length"
+                                    v-for="kw in item.keywords.slice(0, 6)"
+                                    :key="kw"
+                                    class="keyword-chip"
+                                >{{ kw }}</span>
+                                <span v-else class="keyword-chip keyword-chip-muted">no keywords</span>
+                            </div>
                         </div>
                     </div>
                     <!-- Pagination -->
@@ -582,6 +628,18 @@ HTML_PAGE = """
                                 class="tag-chip"
                             >#{{ tag }}</span>
                         </div>
+                        <div v-if="selectedNode.type === 'category'" class="mt-4">
+                            <div class="text-xs font-semibold section-label uppercase mb-2">Keywords</div>
+                            <div class="flex flex-wrap gap-2">
+                                <span
+                                    v-if="selectedNode.keywords?.length"
+                                    v-for="kw in selectedNode.keywords"
+                                    :key="kw"
+                                    class="keyword-chip"
+                                >{{ kw }}</span>
+                                <span v-else class="keyword-chip keyword-chip-muted">no keywords</span>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Content -->
@@ -611,6 +669,15 @@ HTML_PAGE = """
                                 <div class="flex-1 min-w-0">
                                     <div class="font-medium node-hover-accent transition-colors">{{ child.name }}</div>
                                     <p class="text-sm path-text truncate">{{ child.content }}</p>
+                                    <div v-if="child.type === 'category'" class="flex flex-wrap gap-1 mt-2">
+                                        <span
+                                            v-if="child.keywords?.length"
+                                            v-for="kw in child.keywords.slice(0, 4)"
+                                            :key="kw"
+                                            class="keyword-chip"
+                                        >{{ kw }}</span>
+                                        <span v-else class="keyword-chip keyword-chip-muted">no keywords</span>
+                                    </div>
                                 </div>
                                 <svg class="w-5 h-5 path-text node-hover-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
@@ -670,12 +737,25 @@ HTML_PAGE = """
                     >{{ expanded ? '▼' : '▶' }}</span>
                     <span v-else class="w-4"></span>
                     <span>{{ node.type === 'category' ? '📂' : '📄' }}</span>
-                    <span class="truncate text-sm" :class="node.type === 'category' ? 'text-accent font-medium' : 'text-main'">
-                        {{ node.name }}
-                    </span>
-                    <span v-if="node.type === 'category' && childCount !== null" class="text-xs path-text mono">
-                        ({{ childCount }})
-                    </span>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <span class="truncate text-sm" :class="node.type === 'category' ? 'text-accent font-medium' : 'text-main'">
+                                {{ node.name }}
+                            </span>
+                            <span v-if="node.type === 'category' && childCount !== null" class="text-xs path-text mono">
+                                ({{ childCount }})
+                            </span>
+                        </div>
+                        <div v-if="node.type === 'category'" class="flex flex-wrap gap-1 mt-1">
+                            <span
+                                v-if="node.keywords?.length"
+                                v-for="kw in node.keywords.slice(0, 2)"
+                                :key="kw"
+                                class="keyword-chip"
+                            >{{ kw }}</span>
+                            <span v-else class="keyword-chip keyword-chip-muted">no keywords</span>
+                        </div>
+                    </div>
                 </div>
                 <div v-if="expanded && children.length">
                     <tree-node

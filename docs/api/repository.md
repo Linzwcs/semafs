@@ -1,76 +1,55 @@
-# Storage & UoW API
+# Storage and Unit of Work API
 
-本页描述当前存储层契约：`NodeStore`、`TxReader`、`UnitOfWork`、`UoWFactory`。
+Primary files:
 
-## NodeStore (non-transactional reads)
+- `semafs/ports/store.py`
+- `semafs/ports/factory.py`
+- `semafs/infra/storage/sqlite/store.py`
+- `semafs/infra/storage/sqlite/uow.py`
 
-```python
-class NodeStore(Protocol):
-    async def get_by_id(self, node_id: str) -> Node | None: ...
-    async def get_by_path(self, path: str) -> Node | None: ...
-    async def resolve_path(self, path: str) -> str | None: ...
-    async def canonical_path(self, node_id: str) -> str | None: ...
-    async def save(self, node: Node) -> None: ...
-    async def list_children(self, node_id: str) -> list[Node]: ...
-    async def list_siblings(self, node_id: str) -> list[Node]: ...
-    async def get_ancestors(self, node_id: str, max_depth: int = 3) -> list[Node]: ...
-    async def all_node_ids(self) -> frozenset[str]: ...
-    async def all_paths(self) -> frozenset[str]: ...
-```
+## 1. `NodeStore` Protocol
 
-## TxReader (transactional reads)
+Core methods include:
 
-```python
-class TxReader(Protocol):
-    async def get_by_id(self, node_id: str) -> Node | None: ...
-    async def get_by_path(self, path: str) -> Node | None: ...
-    async def resolve_path(self, path: str) -> str | None: ...
-    async def canonical_path(self, node_id: str) -> str | None: ...
-    async def list_children(self, node_id: str) -> list[Node]: ...
-```
+- lookup: `get_by_id`, `get_by_path`, `resolve_path`, `canonical_path`
+- mutation: `save`
+- traversal: `list_children`, `list_siblings`, `get_ancestors`
+- scans: `all_node_ids`, `all_paths`
 
-用于维护流程在同事务视角读取。
+## 2. `TxReader` Protocol
 
-## UnitOfWork
+Transaction-bound read interface used inside UoW.
 
-```python
-class UnitOfWork(Protocol):
-    reader: TxReader
+## 3. `UnitOfWork` Protocol
 
-    def register_new(self, node: Node) -> None: ...
-    def register_dirty(self, node: Node) -> None: ...
-    def register_removed(self, node_id: str) -> None: ...
-    def register_rename(self, node_id: str, new_name: str) -> None: ...
-    def register_move(self, node_id: str, new_parent_id: str) -> None: ...
+Staging operations:
 
-    async def commit(self) -> None: ...
-    async def rollback(self) -> None: ...
-```
+- `register_new`
+- `register_dirty`
+- `register_removed`
+- `register_rename`
+- `register_move`
 
-## UoWFactory
+Transaction operations:
 
-```python
-class UoWFactory(Protocol):
-    store: NodeStore
+- `commit`
+- `rollback`
 
-    async def init(self) -> None: ...
+## 4. `UoWFactory` Protocol
 
-    @asynccontextmanager
-    async def begin(self) -> AsyncIterator[UnitOfWork]: ...
-```
+- `init()`
+- `begin()` async context manager
 
-## Built-in Implementation
-
-当前默认实现：
+## 5. SQLite Implementations
 
 - `SQLiteStore`
 - `SQLiteUoWFactory`
 - `SQLiteUnitOfWork`
-- `SQLiteTxReader`
 
-位于：`semafs/infra/storage/sqlite/`
+Implementation characteristics:
 
-## See Also
-
-- [Transaction Model](/design/transactions)
-- [SemaFS](/api/semafs)
+- transactional write connection per UoW
+- `BEGIN IMMEDIATE` write lock
+- commit-time canonical path recomputation
+- projection table refresh (`node_paths`)
+- archival instead of physical delete

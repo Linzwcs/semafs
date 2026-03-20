@@ -1,79 +1,64 @@
-# Writing Memories
+# Writing
 
-Use the latest write API to append knowledge fragments.
+`SemaFS.write(content, hint=None, payload=None)` is the canonical write entrypoint.
 
-## API
+## 1. Write Semantics
+
+A write does not directly finalize structure. It stages a `PENDING` leaf first, then event-driven maintenance may reorganize and promote.
+
+Internal flow (`engine/intake.py`):
+
+1. Route target via `placer.place(...)`.
+2. Validate resolved target category in transactional reader.
+3. Allocate unique placeholder leaf name (`leaf_<6hex>` style).
+4. Create `NodeType.LEAF` with `NodeStage.PENDING`.
+5. Register new node in UoW and commit.
+6. Publish `Placed` after successful commit.
+
+## 2. Hint Behavior
+
+- `hint=None`: route recursively from `root`.
+- `hint="root.work"`: route recursively within that subtree.
+
+So hint is a routing start path, not a forced final destination.
+
+## 3. Payload Enrichment
+
+`Intake.write` augments payload with:
+
+- `_ingested_at`: UTC ingestion timestamp
+- `_placement`: source, target path, reasoning, and decision steps
+
+This creates a built-in audit trail for placement decisions.
+
+## 4. Python Example
 
 ```python
-leaf_id = await semafs.write(
-    content="Completed sprint planning",
-    hint="root.work",
-    payload={"source": "meeting", "date": "2026-03-20"},
+leaf_id = await fs.write(
+    content="User preference: prefers structured output",
+    hint="root.preferences",
+    payload={"source": "chat_session", "session_id": "s_001"},
 )
 ```
 
-### Parameters
+## 5. CLI Example
 
-| Parameter | Type | Description |
-|---|---|---|
-| `content` | `str` | Required fragment text |
-| `hint` | `str \| None` | Preferred entry path (defaults to `root`) |
-| `payload` | `dict \| None` | Optional metadata JSON |
-
-### Return
-
-- Returns leaf node id (`str`).
-
-## How Placement Works
-
-- `hint` is an entry path, not a guaranteed final leaf path.
-- The configured `placer` decides target category.
-- With `HintPlacer`, content stays at the hinted path.
-
-## Metadata Guidelines
-
-```python
-await semafs.write(
-    content="API docs updated",
-    hint="root.engineering.docs",
-    payload={
-        "source": "git",
-        "author": "alice",
-        "tags": ["docs", "api"],
-        "confidence": 0.93,
-    },
-)
+```bash
+semafs write "User preference: prefers structured output" \
+  --hint root.preferences \
+  --payload '{"source":"chat_session","session_id":"s_001"}' \
+  --provider openai \
+  --db data/demo.db
 ```
 
-Use payload for provenance and filtering context, not for large text blobs.
+## 6. Typical Failures
 
-## Batch Writing Pattern
+- `Target category not found`: invalid hint or route target
+- path format errors from `NodePath` validation
+- provider-level API failures in adapter calls
 
-```python
-for text in [
-    "User prefers async status updates",
-    "Meeting notes should be concise",
-    "Focus hours: 9-11am",
-]:
-    await semafs.write(content=text, hint="root.work")
+Debug sequence:
 
-# Optional: sweep overloaded categories
-await semafs.sweep(limit=20)
-```
-
-## Current vs Old API
-
-Use this now:
-
-- `write(content=..., hint=..., payload=...)`
-
-Do not use old examples like:
-
-- `write(path=..., content=...)`
-- `maintain()`
-
-## Next Steps
-
-- [Reading & Querying](./reading) - Get structured context back
-- [Maintenance](./maintenance) - Event-driven reconcile and `sweep(limit)`
-- [Core Concepts](./concepts) - Node lifecycle and path rules
+1. Verify category paths via `semafs tree root ...`.
+2. Retry with `--hint root` for baseline routing.
+3. Inspect stored payload for `_placement` trail.

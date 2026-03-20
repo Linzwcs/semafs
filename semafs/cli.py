@@ -2,7 +2,7 @@
 
 Primary goals:
 - Stable command entry (`semafs ...`)
-- First-class web server command (`semafs serve`)
+- First-class MCP server command (`semafs serve`)
 - Minimal operational commands for local workflows
 """
 
@@ -17,48 +17,17 @@ from typing import Optional
 
 from .algo import (
     DefaultPolicy,
-    HintPlacer,
     HybridStrategy,
     LLMSummarizer,
     LLMRecursivePlacer,
     PlacementConfig,
-    RuleSummarizer,
 )
 from .infra.bus import InMemoryBus
 from .infra.storage.sqlite.store import SQLiteStore
 from .infra.storage.sqlite.uow import SQLiteUoWFactory
 from .renderer import JSONRenderer, TextRenderer
 from .semafs import SemaFS
-from .serve import run_server
 from .view import view as viewer_main
-
-
-class NoopAdapter:
-    """Fallback LLM adapter for non-LLM mode."""
-
-    async def call(self, snapshot) -> dict:  # noqa: ANN001
-        return {
-            "ops": [],
-            "overall_reasoning": "noop adapter",
-        }
-
-    async def call_summary(self, snapshot) -> dict:  # noqa: ANN001
-        return {"summary": snapshot.target.summary or "", "keywords": []}
-
-    async def call_placement(
-            self,
-            *,
-            content: str,  # noqa: ARG002
-            current_path: str,  # noqa: ARG002
-            current_summary: str,  # noqa: ARG002
-            children: tuple[dict[str, str], ...],  # noqa: ARG002
-    ) -> dict:
-        return {
-            "action": "stay",
-            "target_child": None,
-            "confidence": 1.0,
-            "reasoning": "noop adapter",
-        }
 
 
 @dataclass(frozen=True)
@@ -106,7 +75,9 @@ def _build_adapter(args: argparse.Namespace):
             model=args.model or "claude-haiku-4-5-20251001",
         )
 
-    return NoopAdapter()
+    raise RuntimeError(
+        "Unsupported provider. Choose one of: openai, anthropic."
+    )
 
 
 async def build_runtime(args: argparse.Namespace) -> Runtime:
@@ -117,22 +88,17 @@ async def build_runtime(args: argparse.Namespace) -> Runtime:
     bus = InMemoryBus()
     policy = DefaultPolicy()
 
-    if args.provider == "none":
-        placer = HintPlacer()
-        strategy = HybridStrategy(NoopAdapter())
-        summarizer = RuleSummarizer()
-    else:
-        adapter = _build_adapter(args)
-        placer = LLMRecursivePlacer(
-            store=store,
-            adapter=adapter,
-            config=PlacementConfig(
-                max_depth=args.placement_max_depth,
-                min_confidence=args.placement_min_confidence,
-            ),
-        )
-        strategy = HybridStrategy(adapter)
-        summarizer = LLMSummarizer(adapter)
+    adapter = _build_adapter(args)
+    placer = LLMRecursivePlacer(
+        store=store,
+        adapter=adapter,
+        config=PlacementConfig(
+            max_depth=args.placement_max_depth,
+            min_confidence=args.placement_min_confidence,
+        ),
+    )
+    strategy = HybridStrategy(adapter)
+    summarizer = LLMSummarizer(adapter)
 
     semafs = SemaFS(
         store=store,
@@ -223,36 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="SemaFS command line interface")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # serve
-    p_serve = sub.add_parser("serve", help="Run web server")
-    p_serve.add_argument("--db",
-                         default="data/semafs_real_llm.db",
-                         help="SQLite database path")
-    p_serve.add_argument("--host", default="127.0.0.1", help="Server host")
-    p_serve.add_argument("--port", type=int, default=8080, help="Server port")
-    p_serve.add_argument("--reload",
-                         action="store_true",
-                         help="Enable autoreload")
-
-    # view
-    p_view = sub.add_parser("view", help="Run viewer server")
-    p_view.add_argument("--db",
-                        default="data/semafs_real_llm.db",
-                        help="SQLite database path")
-    p_view.add_argument("--host", default="127.0.0.1", help="Server host")
-    p_view.add_argument("--port", type=int, default=8080, help="Server port")
-    p_view.add_argument("--reload",
-                        action="store_true",
-                        help="Enable autoreload")
-
     def add_runtime_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--db",
                        default="data/semafs_real_llm.db",
                        help="SQLite database path")
         p.add_argument(
             "--provider",
-            choices=("none", "openai", "anthropic"),
-            default="none",
+            choices=("openai", "anthropic"),
+            required=True,
             help="LLM provider",
         )
         p.add_argument("--model",
@@ -274,6 +218,21 @@ def build_parser() -> argparse.ArgumentParser:
             default=0.55,
             help="Recursive placement minimum confidence",
         )
+
+    # serve
+    p_serve = sub.add_parser("serve", help="Run MCP server over stdio")
+    add_runtime_common(p_serve)
+
+    # view
+    p_view = sub.add_parser("view", help="Run viewer server")
+    p_view.add_argument("--db",
+                        default="data/semafs_real_llm.db",
+                        help="SQLite database path")
+    p_view.add_argument("--host", default="127.0.0.1", help="Server host")
+    p_view.add_argument("--port", type=int, default=8080, help="Server port")
+    p_view.add_argument("--reload",
+                        action="store_true",
+                        help="Enable autoreload")
 
     # write
     p_write = sub.add_parser("write", help="Write one content fragment")
@@ -337,11 +296,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "serve":
         try:
+            from .serve import run_server
+
             run_server(
                 db=args.db,
-                host=args.host,
-                port=args.port,
-                reload=args.reload,
+                provider=args.provider,
+                model=args.model,
+                api_key=args.api_key,
+                base_url=args.base_url,
+                placement_max_depth=args.placement_max_depth,
+                placement_min_confidence=args.placement_min_confidence,
             )
         except Exception as exc:  # pragma: no cover - CLI error path
             print(f"Error: {exc}")

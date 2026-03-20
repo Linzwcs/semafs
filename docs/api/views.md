@@ -1,93 +1,72 @@
-# Views API
+# View Objects API
 
-View 层是读接口的结构化返回类型。
+Defined in `semafs/core/views.py`.
 
-## NodeView
+## 1. `NodeView`
 
-```python
-@dataclass(frozen=True)
-class NodeView:
-    node: Node
-    breadcrumb: tuple[str, ...]
-    child_count: int
-    sibling_count: int
-```
+Fields:
 
-属性：
+- `node`
+- `breadcrumb`
+- `child_count`
+- `sibling_count`
+
+Computed properties:
 
 - `path`
 - `is_category`
 - `summary`
 
-## TreeView
+## 2. `TreeView`
 
-```python
-@dataclass(frozen=True)
-class TreeView:
-    node: Node
-    children: tuple[TreeView, ...] = ()
-    depth: int = 0
-```
+Fields:
 
-属性：
+- `node`
+- `children`
+- `depth`
+
+Computed properties:
 
 - `path`
 - `total_nodes`
 - `leaf_count`
 
-## RelatedNodes
+## 3. `RelatedNodes`
 
-```python
-@dataclass(frozen=True)
-class RelatedNodes:
-    current: NodeView
-    parent: NodeView | None = None
-    siblings: tuple[NodeView, ...] = ()
-    children: tuple[NodeView, ...] = ()
-    ancestors: tuple[NodeView, ...] = ()
-```
+Fields:
 
-属性：
+- `current`
+- `parent`
+- `siblings`
+- `children`
+- `ancestors`
+
+Computed property:
 
 - `navigation_summary`
 
-## StatsView
+## 4. `StatsView`
 
-```python
-@dataclass(frozen=True)
-class StatsView:
-    total_categories: int
-    total_leaves: int
-    max_depth: int
-    dirty_categories: int
-    top_categories: tuple[tuple[str, int], ...]
-```
+Fields:
 
-属性：
+- `total_categories`
+- `total_leaves`
+- `max_depth`
+- `dirty_categories`
+- `top_categories`
+
+Computed properties:
 
 - `total_nodes`
 - `summary`
 
-## Renderers
+## 5. Renderers
+
+`semafs/renderer.py` maps view objects to output formats:
 
 - `TextRenderer`
-- `LLMRenderer`
 - `MarkdownRenderer`
+- `LLMRenderer`
 - `JSONRenderer`
 
-示例：
-
-```python
-view = await semafs.read("root")
-if view:
-    print(TextRenderer.render_node(view))
-
-tree = await semafs.tree("root", max_depth=2)
-if tree:
-    print(LLMRenderer.render_tree(tree))
-```
-
-## See Also
-
-- [SemaFS](/api/semafs)
-- [Reading Guide](/guide/reading)
+Renderer layer is presentation-only and does not mutate view/state.

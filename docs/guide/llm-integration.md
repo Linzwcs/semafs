@@ -1,93 +1,49 @@
 # LLM Integration
 
-Connect SemaFS to OpenAI or Anthropic adapters for semantic rebalancing, placement, and summary generation.
+SemaFS uses LLMs for three independent responsibilities:
 
-## Supported Adapters
+- Rebalance planning: `call(snapshot)`
+- Placement routing: `call_placement(...)`
+- Category summarization: `call_summary(snapshot)`
 
-| Provider | Adapter |
-|---|---|
-| OpenAI | `semafs.infra.llm.openai.OpenAIAdapter` |
-| Anthropic | `semafs.infra.llm.anthropic.AnthropicAdapter` |
+## 1. Supported Providers
 
-## OpenAI Setup
+- OpenAI via `OpenAIAdapter`
+- Anthropic via `AnthropicAdapter`
 
-```python
-from openai import AsyncOpenAI
+CLI and MCP runtime parameters:
 
-from semafs import SemaFS
-from semafs.algo import (
-    DefaultPolicy,
-    HybridStrategy,
-    LLMSummarizer,
-    LLMRecursivePlacer,
-    PlacementConfig,
-)
-from semafs.infra.bus import InMemoryBus
-from semafs.infra.llm.openai import OpenAIAdapter
-from semafs.infra.storage.sqlite.store import SQLiteStore
-from semafs.infra.storage.sqlite.uow import SQLiteUoWFactory
+- `--provider openai|anthropic`
+- `--model ...`
+- `--api-key ...` (or env var)
+- `--base-url ...` (OpenAI-compatible gateway)
 
-store = SQLiteStore("data/llm.db")
-factory = SQLiteUoWFactory(store)
-await factory.init()
+## 2. Default Models
 
-client = AsyncOpenAI()  # uses OPENAI_API_KEY
-adapter = OpenAIAdapter(client, model="gpt-4o-mini")
+- OpenAI default: `gpt-4o-mini`
+- Anthropic default: `claude-haiku-4-5-20251001`
 
-fs = SemaFS(
-    store=store,
-    uow_factory=factory,
-    bus=InMemoryBus(),
-    strategy=HybridStrategy(adapter),
-    placer=LLMRecursivePlacer(
-        store=store,
-        adapter=adapter,
-        config=PlacementConfig(max_depth=4, min_confidence=0.55),
-    ),
-    summarizer=LLMSummarizer(adapter),
-    policy=DefaultPolicy(),
-)
-```
+Override with `--model`.
 
-## Anthropic Setup
+## 3. Prompt and Tool Schema
 
-```python
-from anthropic import AsyncAnthropic
-from semafs.infra.llm.anthropic import AnthropicAdapter
+Prompt builders are defined in `semafs/infra/llm/prompt.py`.
 
-client = AsyncAnthropic()  # uses ANTHROPIC_API_KEY
-adapter = AnthropicAdapter(client, model="claude-haiku-4-5-20251001")
-```
+Design highlights:
 
-Use this `adapter` the same way in `HybridStrategy`, `LLMRecursivePlacer`, and `LLMSummarizer`.
+- strict tool/function-calling schema
+- explicit naming and summary contracts
+- keyword constraints and placeholder-category rejection
 
-## What the Adapter Is Used For
+## 4. Failure Behavior
 
-- `strategy`: draft rebalance plan (`MERGE/GROUP/MOVE/RENAME`)
-- `placer`: recursive routing for write placement
-- `summarizer`: category summary/keywords refresh
+- Rebalance call failure: `HybridStrategy` skips structural changes this round.
+- Summary call failure: summarizer falls back to existing summary.
+- Placement call failure: exception bubbles up to caller runtime.
 
-## Operational Advice
+## 5. Production Guidance
 
-- start with low-cost model (`gpt-4o-mini`, fast Claude tier)
-- keep `HintPlacer + RuleSummarizer` for offline/local flows
-- use `sweep(limit)` in batch jobs after large imports
-
-## Current vs Old Docs
-
-Use now:
-
-- `HybridStrategy(adapter)`
-- `LLMRecursivePlacer(...)`
-- `LLMSummarizer(adapter)`
-
-Do not rely on old docs claiming:
-
-- built-in `RuleOnlyStrategy`
-- `maintain()` entrypoint
-
-## Next Steps
-
-- [Strategies](./strategies) - Implement custom `draft(snapshot)` behavior
-- [Maintenance](./maintenance) - Reconcile pipeline and sweep policy
-- [Agent Memory](./agent-memory) - Tool-oriented integration patterns
+- tune `placement_max_depth` and `placement_min_confidence`
+- tune `Budget(soft, hard)` for workload size
+- keep `_placement` payload for route diagnostics
+- treat provider/model changes as behavior-impacting config changes

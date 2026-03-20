@@ -1,78 +1,80 @@
 # Maintenance
 
-How maintenance works in the latest SemaFS.
+`Keeper` orchestrates maintenance to keep category structure healthy and summaries up to date.
 
-## Two Maintenance Paths
+## 1. Trigger Paths
 
-### 1) Event-driven reconcile (default)
+### 1.1 Event-Driven Path
 
-After `write()`, SemaFS publishes a `Placed` event and reconciles the target category automatically.
+After write commit:
 
-### 2) Manual sweep
+```text
+Placed -> Pulse.seed -> Keeper.reconcile(...)
+```
 
-Use `sweep(limit)` to process categories that exceed budget thresholds.
+Pulse subscriptions include `Placed`, `Persisted`, and `Moved`.
+
+### 1.2 Manual Sweep Path
 
 ```python
-changed = await semafs.sweep(limit=20)
-print("processed categories:", changed)
+changed = await fs.sweep(limit=20)
 ```
 
-## What `sweep()` Actually Does
+`sweep` scans overloaded categories and reconciles each.
 
-- Finds overloaded categories (by current `Budget` thresholds)
-- Processes them deepest-first
-- Runs rebalance/rollup/summary/propagation phases
-- Returns number of processed categories
+## 2. Reconcile Phase Pipeline
 
-## Reconcile Pipeline
+Implemented in `engine/keeper.py` and `engine/phases.py`:
 
-```mermaid
-graph LR
-    A[Capture Snapshot] --> B[Rebalance Phase]
-    B --> C[Rollup Phase]
-    C --> D[Post Phases]
-    D --> E[Commit]
-    E --> F[Publish Events]
-    F --> G[Propagate Upward]
-```
+1. Build immutable snapshot (`SnapshotBuilder`)
+2. Rebalance phase (strategy -> guard -> resolver -> executor)
+3. Rollup phase (terminal categories only)
+4. Lifecycle phase (`PENDING -> ACTIVE`)
+5. Summary phase (refresh category summary/meta)
+6. Commit transaction
+7. Propagation phase (optional parent reconcile)
 
-## Trigger Strategy
+## 3. Locking Model
 
-Use this rule of thumb:
+Keeper uses per-node `asyncio.Lock`:
 
-- small/interactive writes: rely on event-driven reconcile
-- backlog or large imports: call `sweep(limit=...)` periodically
+- single category reconciles are serialized
+- unrelated categories can proceed concurrently
+- events are published after lock release to reduce deadlock risk
 
-## Budget Tuning
+## 4. Rebalance Conditions
 
-```python
-from semafs.core.capacity import Budget
+Driven by `Budget(soft, hard)` zone:
 
-# lower threshold => more aggressive maintenance
-budget = Budget(soft=4, hard=6)
+- `HEALTHY` with no pending: generally skip rebalancing
+- `PRESSURED` or `OVERFLOW`: call strategy (`HybridStrategy` by default)
 
-# higher threshold => fewer maintenance rounds
-budget = Budget(soft=12, hard=20)
-```
+## 5. Terminal Rollup Conditions
 
-## Safety Guarantees
+Rollup requires:
 
-- transaction-based apply via Unit of Work
-- guarded plan parsing/validation before mutation
-- per-node reconcile lock to avoid conflicting writes
+- depth at or beyond `terminal_depth`
+- active leaves above `rollup_trigger_count`
+- batch size at least `min_rollup_batch`
 
-## Current vs Old API
+On success, old batch leaves become `COLD` and a `rollup_*` leaf is created.
 
-Use:
+## 6. Propagation Policy
 
-- `sweep(limit)`
+Default behavior (`DefaultPolicy`):
 
-Do not use old examples like:
+- seed by event weight
+- linear decay per hop
+- stop below threshold
+- stop at root
 
-- `maintain()`
+## 7. Observability
 
-## Next Steps
+`ReconcileMetrics` tracks:
 
-- [Strategies](./strategies) - LLM vs non-LLM organization behavior
-- [Transactions](./transactions) - Atomic mutation model
-- [Operations](./operations) - Merge/Group/Move semantics
+- attempted/completed rebalance
+- promoted count
+- rollup flag
+- summary change flag
+- propagation flag
+- guard reject counts

@@ -4,91 +4,71 @@ layout: home
 hero:
   name: SemaFS
   text: Semantic Filesystem for LLM Memory
-  tagline: Give your LLM a persistent, self-organizing memory that grows smarter over time.
+  tagline: Structured memory trees with event-driven maintenance and transactional consistency.
   image:
     src: /logo.svg
     alt: SemaFS
   actions:
     - theme: brand
-      text: Get Started
-      link: /guide/introduction
+      text: Quick Start
+      link: /guide/quickstart
     - theme: alt
-      text: Value & Benchmark
-      link: /guide/value-benchmark
+      text: Architecture
+      link: /design/architecture
     - theme: alt
-      text: View on GitHub
-      link: https://github.com/linzwcs/semafs
+      text: API Reference
+      link: /api/semafs
 
 features:
   - icon: 🌲
-    title: Hierarchical Organization
-    details: Organize memories like a filesystem. Deeper = more specific. Parents automatically summarize children.
+    title: Canonical Tree Memory
+    details: "All memory is organized under explicit canonical paths such as root.work.notes."
+  - icon: 🔄
+    title: Event-Driven Reconcile
+    details: "Writes commit first, then trigger maintenance through domain events and propagation policy."
+  - icon: 🧱
+    title: SQLite + Unit of Work
+    details: "Structural mutations are atomic, with path recomputation and projection refresh at commit time."
   - icon: 🤖
-    title: LLM-Powered Maintenance
-    details: Automatic reorganization with Merge, Group, and Move operations. Your knowledge base grows smarter over time.
-  - icon: ⚡
-    title: Write-Maintain-Read
-    details: O(1) writes, batch maintenance, structured reads. Designed for high performance and low latency.
-  - icon: 🛡️
-    title: ACID Transactions
-    details: Unit of Work pattern ensures atomic operations. All changes succeed together or roll back completely.
-  - icon: 💰
-    title: Cost-Optimized
-    details: Hybrid strategy uses rules when possible, LLM when needed. Guaranteed fallback ensures reliability.
+    title: LLM in Three Roles
+    details: "Placement routing, structural rebalancing, and category summarization are independently pluggable."
   - icon: 🔌
-    title: Pluggable Architecture
-    details: Hexagonal design with clean ports & adapters. Swap storage, LLM providers, or strategies easily.
+    title: MCP Native
+    details: "semafs serve exposes write/read/list/tree/stats/sweep as MCP tools over stdio."
+  - icon: 👀
+    title: Standalone Viewer
+    details: "semafs view runs an HTTP explorer for browsing and searching nodes without MCP coupling."
 ---
 
-## Quick Example (Latest API)
+## What This Documentation Covers
+
+This documentation is written against the current repository implementation under `semafs/`.
+
+It focuses on:
+
+- Runtime architecture and lifecycle flow
+- Operational usage through CLI, Python, MCP, and Viewer
+- Extension points through ports, strategies, and adapters
+- Consistency guarantees through SQLite and Unit of Work
+
+## Runtime Facts
+
+- Write path: `SemaFS.write -> Intake.write -> UoW commit -> publish(Placed)`
+- Maintenance path: `Pulse._on_event -> Keeper.reconcile`
+- Reconcile phases: `RebalancePhase -> RollupPhase -> PostRebalancePhases`
+- Default storage: `SQLiteStore + SQLiteUoWFactory`
+- Default strategy stack: `HybridStrategy + LLMRecursivePlacer + LLMSummarizer + DefaultPolicy`
+
+## Minimal Working Commands
 
 ```bash
-# Write two fragments into root.preferences and run one maintenance sweep
-semafs write "I love dark roast coffee" --hint root.preferences --sweep
-semafs write "Ethiopian beans are my favorite" --hint root.preferences --sweep
+export OPENAI_API_KEY="sk-..."
 
-# Read structured tree
-semafs tree root --max-depth 2
+semafs write "User prefers async updates" \
+  --hint root.work \
+  --provider openai \
+  --db data/demo.db
+
+semafs tree root --provider openai --db data/demo.db --max-depth 2
+semafs stats --provider openai --db data/demo.db --output json
 ```
-
-## The Problem
-
-LLMs are **stateless**. Every conversation starts fresh.
-
-| Existing Approach | Limitation |
-|-------------------|------------|
-| Vector DB | No structure, just similarity |
-| Key-Value Store | Flat, no relationships |
-| RAG | Retrieval-only, no organization |
-| Context Stuffing | Token limits, expensive |
-
-## The Solution
-
-**SemaFS organizes memories hierarchically** with automatic semantic maintenance.
-
-```
-root/
-├── preferences/
-│   ├── food/
-│   │   ├── coffee → "Dark roast, Ethiopian, no sugar"
-│   │   └── cuisine → "Japanese, especially sushi"
-│   └── work/
-│       └── meetings → "Morning standups, async preferred"
-└── projects/
-    └── semafs → "Building a semantic filesystem..."
-```
-
-::: tip Key Insight
-Human knowledge is hierarchical. LLM memory should be too.
-:::
-
-## Why SemaFS Now
-
-`SemaFS` is strongest when you need **deterministic + explainable memory maintenance**:
-
-- Reliable write path with transaction boundaries (SQLite UoW)
-- Hybrid maintenance (`rules + LLM`) with guardrails and graceful fallback
-- Hierarchical summaries for token-efficient retrieval
-
-For a full evaluation and open-source benchmark, see:
-[Value & Benchmark](/guide/value-benchmark)

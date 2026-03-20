@@ -1,472 +1,253 @@
-"""SemaFS web server entrypoint.
+"""SemaFS MCP server entrypoint.
 
 Provides:
-- FastAPI app factory for node browsing/search
-- `python -m semafs.serve` runnable server
+- FastMCP app factory for SemaFS operations
+- `python -m semafs.serve` runnable MCP stdio server
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import sqlite3
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
-HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SemaFS Server</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-  <style>
-    [v-cloak] { display: none; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      background: #f7f8f5;
-      color: #1f2a20;
-    }
-    .panel {
-      background: #fff;
-      border: 1px solid #d9dfd3;
-      border-radius: 12px;
-    }
-    .muted { color: #718072; }
-  </style>
-</head>
-<body>
-  <div id="app" v-cloak class="max-w-7xl mx-auto p-4 md:p-6">
-    <header class="mb-4 md:mb-6">
-      <div class="flex flex-wrap items-center gap-3 justify-between">
-        <h1 class="text-2xl font-semibold">SemaFS Server</h1>
-        <div v-if="stats" class="text-sm muted">
-          {{ stats.total }} nodes · {{ stats.categories }} categories · {{ stats.leaves }} leaves
-        </div>
-      </div>
-    </header>
-
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
-      <aside class="lg:col-span-4 panel p-3 overflow-y-auto max-h-[70vh]">
-        <div class="mb-3">
-          <input
-            v-model="searchQuery"
-            @keyup.enter="search"
-            class="w-full border border-[#d9dfd3] rounded px-3 py-2 text-sm"
-            placeholder="Search (name/content/summary), press Enter"
-          />
-        </div>
-        <div v-if="searchResults" class="mb-3">
-          <div class="flex items-center justify-between mb-2">
-            <div class="text-sm font-medium">Search results ({{ searchResults.total }})</div>
-            <button @click="clearSearch" class="text-sm muted hover:text-black">Clear</button>
-          </div>
-          <div class="space-y-2">
-            <button
-              v-for="item in searchResults.items"
-              :key="item.id"
-              class="w-full text-left border border-[#e3e8df] rounded p-2 hover:bg-[#f5f8f2]"
-              @click="selectNode(item); clearSearch()"
-            >
-              <div class="font-medium text-sm">{{ item.name }}</div>
-              <div class="text-xs muted">{{ item.path }}</div>
-            </button>
-          </div>
-        </div>
-
-        <div v-if="rootNode">
-          <tree-node :node="rootNode" :depth="0" :selected-id="selectedNode?.id" @select="selectNode" />
-        </div>
-      </aside>
-
-      <main class="lg:col-span-8 space-y-4">
-        <section v-if="selectedNode" class="panel p-4">
-          <div class="text-sm muted mb-1">{{ selectedNode.path }}</div>
-          <h2 class="text-xl font-semibold">{{ selectedNode.name }}</h2>
-          <div class="text-sm muted mt-1">Type: {{ selectedNode.type }} · Stage: {{ selectedNode.stage }}</div>
-          <p v-if="selectedNode.content" class="mt-4 whitespace-pre-wrap leading-relaxed text-sm">{{ selectedNode.content }}</p>
-        </section>
-
-        <section v-if="children?.items?.length" class="panel p-4">
-          <h3 class="font-semibold mb-3">Children ({{ children.total }})</h3>
-          <div class="space-y-2">
-            <button
-              v-for="child in children.items"
-              :key="child.id"
-              class="w-full text-left border border-[#e3e8df] rounded p-2 hover:bg-[#f5f8f2]"
-              @click="selectNode(child)"
-            >
-              <div class="font-medium text-sm">{{ child.name }}</div>
-              <div class="text-xs muted">{{ child.path }}</div>
-            </button>
-          </div>
-        </section>
-      </main>
-    </div>
-  </div>
-
-  <script>
-    const { createApp, ref, onMounted } = Vue;
-
-    const TreeNode = {
-      name: "TreeNode",
-      props: ["node", "depth", "selectedId"],
-      emits: ["select"],
-      template: `
-        <div>
-          <div
-            class="flex items-center gap-2 rounded px-2 py-1.5 cursor-pointer hover:bg-[#f5f8f2]"
-            :class="node.id === selectedId ? 'bg-[#e8f2eb]' : ''"
-            :style="{ paddingLeft: (8 + depth * 16) + 'px' }"
-            @click="toggleSelect"
-          >
-            <button
-              v-if="node.type === 'category'"
-              class="text-xs muted w-4 text-left"
-              @click.stop="toggleExpand"
-            >{{ expanded ? '▼' : '▶' }}</button>
-            <span v-else class="w-4"></span>
-            <span class="text-sm">{{ node.name }}</span>
-          </div>
-          <div v-if="expanded && loading" class="text-xs muted px-2 py-1" :style="{ paddingLeft: (24 + depth * 16) + 'px' }">Loading...</div>
-          <tree-node
-            v-for="child in children"
-            v-if="expanded"
-            :key="child.id"
-            :node="child"
-            :depth="depth + 1"
-            :selected-id="selectedId"
-            @select="$emit('select', $event)"
-          />
-        </div>
-      `,
-      data() {
-        return {
-          expanded: this.depth === 0,
-          loading: false,
-          children: [],
-        };
-      },
-      methods: {
-        toggleSelect() {
-          this.$emit("select", this.node);
-        },
-        async toggleExpand() {
-          this.expanded = !this.expanded;
-          if (this.expanded && this.children.length === 0) {
-            await this.loadChildren();
-          }
-        },
-        async loadChildren() {
-          if (this.node.type !== "category") return;
-          this.loading = true;
-          try {
-            const resp = await fetch(`/api/node/${this.node.id}/children?offset=0&limit=50`);
-            const data = await resp.json();
-            this.children = data.items || [];
-          } finally {
-            this.loading = false;
-          }
-        },
-      },
-      async mounted() {
-        if (this.expanded && this.node.type === "category") {
-          await this.loadChildren();
-        }
-      },
-    };
-
-    createApp({
-      components: { TreeNode },
-      setup() {
-        const stats = ref(null);
-        const rootNode = ref(null);
-        const selectedNode = ref(null);
-        const children = ref(null);
-        const searchQuery = ref("");
-        const searchResults = ref(null);
-
-        const loadStats = async () => {
-          const res = await fetch("/api/stats");
-          stats.value = await res.json();
-        };
-        const loadRoot = async () => {
-          const res = await fetch("/api/root");
-          rootNode.value = await res.json();
-          await selectNode(rootNode.value);
-        };
-        const selectNode = async (node) => {
-          selectedNode.value = node;
-          if (node.type === "category") {
-            const res = await fetch(`/api/node/${node.id}/children?offset=0&limit=20`);
-            children.value = await res.json();
-          } else {
-            children.value = null;
-          }
-        };
-        const search = async () => {
-          if (!searchQuery.value.trim()) return;
-          const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery.value)}&offset=0&limit=20`);
-          searchResults.value = await res.json();
-        };
-        const clearSearch = () => {
-          searchResults.value = null;
-          searchQuery.value = "";
-        };
-
-        onMounted(async () => {
-          await Promise.all([loadStats(), loadRoot()]);
-        });
-
-        return {
-          stats,
-          rootNode,
-          selectedNode,
-          children,
-          searchQuery,
-          searchResults,
-          selectNode,
-          search,
-          clearSearch,
-        };
-      },
-    }).mount("#app");
-  </script>
-</body>
-</html>
-"""
+from .algo import (
+    DefaultPolicy,
+    HybridStrategy,
+    LLMSummarizer,
+    LLMRecursivePlacer,
+    PlacementConfig,
+)
+from .infra.bus import InMemoryBus
+from .infra.storage.sqlite.store import SQLiteStore
+from .infra.storage.sqlite.uow import SQLiteUoWFactory
+from .renderer import JSONRenderer
+from .semafs import SemaFS
 
 
-class NodeDB:
-    """SQLite query helper for server browsing APIs."""
-
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    @staticmethod
-    def _active_where() -> str:
-        return "COALESCE(is_archived, 0) = 0 AND stage != 'archived'"
-
-    def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        return {
-            "id": row["id"],
-            "parent_id": row["parent_id"],
-            "name": row["name"],
-            "path": row["canonical_path"],
-            "type": row["node_type"],
-            "stage": row["stage"],
-            "content": row["content"] or row["summary"] or "",
-            "tags": json.loads(row["tags"] or "[]"),
-            "skeleton": bool(row["skeleton"]),
-        }
-
-    def get_root(self) -> Optional[dict]:
-        with self._conn() as conn:
-            cur = conn.execute("SELECT * FROM nodes WHERE canonical_path = 'root'")
-            row = cur.fetchone()
-            return self._row_to_dict(row) if row else None
-
-    def get_node(self, node_id: str) -> Optional[dict]:
-        with self._conn() as conn:
-            cur = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
-            row = cur.fetchone()
-            return self._row_to_dict(row) if row else None
-
-    def get_node_by_path(self, path: str) -> Optional[dict]:
-        with self._conn() as conn:
-            cur = conn.execute("SELECT * FROM nodes WHERE canonical_path = ?", (path,))
-            row = cur.fetchone()
-            return self._row_to_dict(row) if row else None
-
-    def get_children(self, parent_id: str, offset: int = 0, limit: int = 50) -> dict:
-        active = self._active_where()
-        with self._conn() as conn:
-            cur = conn.execute(
-                f"SELECT COUNT(*) FROM nodes WHERE parent_id = ? AND {active}",
-                (parent_id,),
-            )
-            total = cur.fetchone()[0]
-
-            cur = conn.execute(
-                f"""SELECT * FROM nodes
-                    WHERE parent_id = ? AND {active}
-                    ORDER BY node_type DESC, name ASC
-                    LIMIT ? OFFSET ?""",
-                (parent_id, limit, offset),
-            )
-            items = [self._row_to_dict(r) for r in cur.fetchall()]
-            return {
-                "items": items,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-            }
-
-    def get_ancestors(self, node_id: str) -> list[dict]:
-        ancestors: list[dict] = []
-        with self._conn() as conn:
-            current_id = node_id
-            while current_id:
-                cur = conn.execute("SELECT * FROM nodes WHERE id = ?", (current_id,))
-                row = cur.fetchone()
-                if not row:
-                    break
-                ancestors.insert(0, self._row_to_dict(row))
-                current_id = row["parent_id"]
-        return ancestors
-
-    def search(self, query: str, offset: int = 0, limit: int = 50) -> dict:
-        active = self._active_where()
-        pattern = f"%{query}%"
-        with self._conn() as conn:
-            cur = conn.execute(
-                f"""SELECT COUNT(*) FROM nodes
-                    WHERE {active}
-                    AND (name LIKE ? OR content LIKE ? OR summary LIKE ?)""",
-                (pattern, pattern, pattern),
-            )
-            total = cur.fetchone()[0]
-
-            cur = conn.execute(
-                f"""SELECT * FROM nodes
-                    WHERE {active}
-                    AND (name LIKE ? OR content LIKE ? OR summary LIKE ?)
-                    ORDER BY canonical_path ASC
-                    LIMIT ? OFFSET ?""",
-                (pattern, pattern, pattern, limit, offset),
-            )
-            items = [self._row_to_dict(r) for r in cur.fetchall()]
-            return {
-                "items": items,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-                "query": query,
-            }
-
-    def get_stats(self) -> dict:
-        active = self._active_where()
-        with self._conn() as conn:
-            cur = conn.execute(f"SELECT COUNT(*) FROM nodes WHERE {active}")
-            total = cur.fetchone()[0]
-            cur = conn.execute(
-                f"SELECT COUNT(*) FROM nodes WHERE node_type = 'category' AND {active}"
-            )
-            categories = cur.fetchone()[0]
-            cur = conn.execute(
-                f"SELECT COUNT(*) FROM nodes WHERE node_type = 'leaf' AND {active}"
-            )
-            leaves = cur.fetchone()[0]
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM nodes WHERE stage = 'pending' AND COALESCE(is_archived, 0) = 0"
-            )
-            pending = cur.fetchone()[0]
-            cur = conn.execute(
-                "SELECT MAX(LENGTH(canonical_path) - LENGTH(REPLACE(canonical_path, '.', ''))) FROM nodes"
-            )
-            max_depth = cur.fetchone()[0] or 0
-            return {
-                "total": total,
-                "categories": categories,
-                "leaves": leaves,
-                "pending": pending,
-                "max_depth": max_depth,
-            }
+@dataclass(frozen=True)
+class Runtime:
+    semafs: SemaFS
+    store: SQLiteStore
 
 
-def create_app(db_path: str):
-    """Create FastAPI app for a specific database path."""
+@dataclass(frozen=True)
+class ServerConfig:
+    db: str = "data/semafs_real_llm.db"
+    provider: str = "openai"
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    placement_max_depth: int = 4
+    placement_min_confidence: float = 0.55
+
+
+def _build_adapter(config: ServerConfig):
+    if config.provider == "openai":
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenAI provider requires dependency: pip install 'semafs[openai]'"
+            ) from exc
+        api_key = config.api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for provider=openai")
+
+        client_kwargs: dict[str, str] = {"api_key": api_key}
+        if config.base_url:
+            client_kwargs["base_url"] = config.base_url
+
+        client = AsyncOpenAI(**client_kwargs)
+        from .infra.llm.openai import OpenAIAdapter
+
+        return OpenAIAdapter(client, model=config.model or "gpt-4o-mini")
+
+    if config.provider == "anthropic":
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise RuntimeError(
+                "Anthropic provider requires dependency: pip install 'semafs[anthropic]'"
+            ) from exc
+        api_key = config.api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required for provider=anthropic")
+
+        client = AsyncAnthropic(api_key=api_key)
+        from .infra.llm.anthropic import AnthropicAdapter
+
+        return AnthropicAdapter(
+            client,
+            model=config.model or "claude-haiku-4-5-20251001",
+        )
+
+    raise RuntimeError("Unsupported provider. Choose one of: openai, anthropic.")
+
+
+async def build_runtime(config: ServerConfig) -> Runtime:
+    db_path = Path(config.db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+
+    store = SQLiteStore(str(db_path))
+    factory = SQLiteUoWFactory(store)
+    await factory.init()
+
+    adapter = _build_adapter(config)
+    semafs = SemaFS(
+        store=store,
+        uow_factory=factory,
+        bus=InMemoryBus(),
+        strategy=HybridStrategy(adapter),
+        placer=LLMRecursivePlacer(
+            store=store,
+            adapter=adapter,
+            config=PlacementConfig(
+                max_depth=config.placement_max_depth,
+                min_confidence=config.placement_min_confidence,
+            ),
+        ),
+        summarizer=LLMSummarizer(adapter),
+        policy=DefaultPolicy(),
+    )
+    return Runtime(semafs=semafs, store=store)
+
+
+def create_mcp_server(config: ServerConfig):
     try:
-        from fastapi import FastAPI, HTTPException
-        from fastapi.responses import HTMLResponse
+        from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
         raise RuntimeError(
-            "Missing server dependencies. Install with: pip install 'semafs[server]'"
+            "Missing MCP dependency. Install with: pip install 'semafs[mcp]'"
         ) from exc
 
-    app = FastAPI(title="SemaFS Server")
-    node_db = NodeDB(db_path=db_path)
+    mcp = FastMCP("SemaFS")
+    runtime: Runtime | None = None
+    runtime_lock = asyncio.Lock()
 
-    @app.get("/api/stats")
-    def api_stats():
-        return node_db.get_stats()
+    async def get_runtime() -> Runtime:
+        nonlocal runtime
+        if runtime is not None:
+            return runtime
+        async with runtime_lock:
+            if runtime is None:
+                runtime = await build_runtime(config)
+        return runtime
 
-    @app.get("/api/root")
-    def api_root():
-        root = node_db.get_root()
-        if not root:
-            raise HTTPException(404, "Root not found")
-        return root
+    @mcp.tool()
+    async def write(
+        content: str,
+        hint: str | None = None,
+        payload_json: str | None = None,
+        sweep: bool = False,
+        sweep_limit: int | None = None,
+    ) -> dict:
+        """Write a content fragment into SemaFS and optionally run one sweep."""
+        rt = await get_runtime()
+        payload = None
+        if payload_json:
+            payload = json.loads(payload_json)
 
-    @app.get("/api/node/{node_id}")
-    def api_node(node_id: str):
-        node = node_db.get_node(node_id)
-        if not node:
-            raise HTTPException(404, "Node not found")
-        return node
+        leaf_id = await rt.semafs.write(content=content, hint=hint, payload=payload)
+        result = {"leaf_id": leaf_id}
+        if sweep:
+            result["sweep_changed"] = await rt.semafs.sweep(limit=sweep_limit)
+        return result
 
-    @app.get("/api/node/{node_id}/children")
-    def api_node_children(node_id: str, offset: int = 0, limit: int = 50):
-        return node_db.get_children(node_id, offset, limit)
+    @mcp.tool()
+    async def read(path: str) -> dict:
+        """Read one node by canonical path."""
+        rt = await get_runtime()
+        view = await rt.semafs.read(path)
+        if not view:
+            return {"found": False, "path": path}
+        return {"found": True, "node": json.loads(JSONRenderer.render_node(view))}
 
-    @app.get("/api/node/{node_id}/ancestors")
-    def api_node_ancestors(node_id: str):
-        return node_db.get_ancestors(node_id)
+    @mcp.tool()
+    async def list(path: str) -> dict:
+        """List direct children under a canonical path."""
+        rt = await get_runtime()
+        views = await rt.semafs.list(path)
+        return {
+            "path": path,
+            "total": len(views),
+            "items": [json.loads(JSONRenderer.render_node(v)) for v in views],
+        }
 
-    @app.get("/api/path")
-    def api_path(path: str):
-        node = node_db.get_node_by_path(path)
-        if not node:
-            raise HTTPException(404, "Path not found")
-        return node
+    @mcp.tool()
+    async def tree(path: str = "root", max_depth: int = 3) -> dict:
+        """Return a recursive tree snapshot from a path."""
+        rt = await get_runtime()
+        tree_view = await rt.semafs.tree(path=path, max_depth=max_depth)
+        if not tree_view:
+            return {"found": False, "path": path}
+        return {"found": True, "tree": json.loads(JSONRenderer.render_tree(tree_view))}
 
-    @app.get("/api/search")
-    def api_search(q: str, offset: int = 0, limit: int = 50):
-        return node_db.search(q, offset, limit)
+    @mcp.tool()
+    async def stats() -> dict:
+        """Return SemaFS aggregate statistics."""
+        rt = await get_runtime()
+        stats_view = await rt.semafs.stats()
+        return json.loads(JSONRenderer.render_stats(stats_view))
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        return HTML_PAGE
+    @mcp.tool()
+    async def sweep(limit: int | None = None) -> dict:
+        """Run one maintenance sweep and return changed category count."""
+        rt = await get_runtime()
+        changed = await rt.semafs.sweep(limit=limit)
+        return {"changed": changed}
 
-    return app
+    return mcp
 
 
 def run_server(
     db: str = "data/semafs_real_llm.db",
-    host: str = "127.0.0.1",
-    port: int = 8080,
-    reload: bool = False,
+    provider: str = "openai",
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    placement_max_depth: int = 4,
+    placement_min_confidence: float = 0.55,
 ) -> None:
-    """Run uvicorn server."""
-    try:
-        import uvicorn
-    except ImportError as exc:
-        raise RuntimeError(
-            "Missing uvicorn. Install with: pip install 'semafs[server]'"
-        ) from exc
-
-    db_path = Path(db)
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-
-    app = create_app(str(db_path))
-    uvicorn.run(app, host=host, port=port, reload=reload, log_level="warning")
+    """Run MCP server over stdio."""
+    mcp = create_mcp_server(
+        ServerConfig(
+            db=db,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            placement_max_depth=placement_max_depth,
+            placement_min_confidence=placement_min_confidence,
+        )
+    )
+    mcp.run(transport="stdio")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run SemaFS web server")
+    parser = argparse.ArgumentParser(description="Run SemaFS MCP server")
     parser.add_argument("--db", default="data/semafs_real_llm.db", help="SQLite database path")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    parser.add_argument("--port", type=int, default=8080, help="Server port")
-    parser.add_argument("--reload", action="store_true", help="Enable autoreload")
+    parser.add_argument(
+        "--provider",
+        choices=("openai", "anthropic"),
+        required=True,
+        help="LLM provider",
+    )
+    parser.add_argument("--model", default=None, help="Model name for selected provider")
+    parser.add_argument("--api-key", default=None, help="Provider API key (optional, env fallback)")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
+    parser.add_argument("--placement-max-depth", type=int, default=4, help="Recursive placement max depth")
+    parser.add_argument(
+        "--placement-min-confidence",
+        type=float,
+        default=0.55,
+        help="Recursive placement minimum confidence",
+    )
     return parser
 
 
@@ -474,7 +255,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        run_server(db=args.db, host=args.host, port=args.port, reload=args.reload)
+        run_server(
+            db=args.db,
+            provider=args.provider,
+            model=args.model,
+            api_key=args.api_key,
+            base_url=args.base_url,
+            placement_max_depth=args.placement_max_depth,
+            placement_min_confidence=args.placement_min_confidence,
+        )
     except Exception as exc:  # pragma: no cover - CLI error path
         print(f"Error: {exc}")
         return 1

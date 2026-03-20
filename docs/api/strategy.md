@@ -1,79 +1,60 @@
-# Strategy API
+# Strategies and Adapters API
 
-维护策略的核心输入是 `Snapshot`，核心输出是 `RawPlan | None`。
+Based on protocols in `semafs/ports/*` and implementations in `semafs/algo/*` and `semafs/infra/llm/*`.
 
-## Strategy Protocol
-
-```python
-class Strategy(Protocol):
-    async def draft(self, snapshot: Snapshot) -> RawPlan | None: ...
-```
-
-- 返回 `None`：本轮不做结构重排。
-- 返回 `RawPlan`：进入 guard + resolve + execute 流程。
-
-## Built-in Strategy
-
-### `HybridStrategy`
+## 1. `Strategy`
 
 ```python
-from semafs.algo import HybridStrategy
-
-strategy = HybridStrategy(adapter, force_threshold=None)
+async def draft(snapshot: Snapshot) -> RawPlan | None
 ```
 
-高层行为：
+Default implementation: `HybridStrategy`.
 
-- 健康且无 pending：跳过
-- 压力/溢出：调用 LLM 生成 raw ops
-- LLM 失败：跳过本轮重排（安全 no-op）
-
-## Raw Plan Types
-
-`RawPlan.ops` 可以包含：
-
-- `RawMerge`
-- `RawGroup`
-- `RawMove`
-- `RawRename`
-- `RawRollup`
-
-解析后会转为可执行 `Plan`（见 [Operations](/api/operations)）。
-
-## LLM Adapter Protocol
+## 2. `Placer`
 
 ```python
-class LLMAdapter(Protocol):
-    async def call(self, snapshot: Snapshot) -> dict: ...
-    async def call_summary(self, snapshot: Snapshot) -> dict: ...
-    async def call_placement(
-        self,
-        *,
-        content: str,
-        current_path: str,
-        current_summary: str,
-        children: tuple[dict[str, str], ...],
-    ) -> dict: ...
+async def place(content: str, start_path: str = "root") -> PlacementRoute
 ```
 
-内置适配器：
+Default implementations:
+
+- `LLMRecursivePlacer`
+- `HintPlacer`
+
+## 3. `Summarizer`
+
+```python
+async def summarize(snapshot: Snapshot) -> tuple[str, tuple[str, ...] | None]
+```
+
+Default implementations:
+
+- `LLMSummarizer`
+- `RuleSummarizer`
+
+## 4. `Policy` (Propagation)
+
+```python
+def seed(event: TreeEvent, target_path: str) -> Signal
+def step(ctx: Context) -> Step
+```
+
+Default implementation: `DefaultPolicy`.
+
+Decorator variants:
+
+- `ZoneAwarePolicy`
+- `DepthAwarePolicy`
+
+## 5. `LLMAdapter`
+
+```python
+async def call(snapshot) -> dict
+async def call_summary(snapshot) -> dict
+async def call_placement(...) -> dict
+```
+
+Default implementations:
 
 - `OpenAIAdapter`
 - `AnthropicAdapter`
-
-## Minimal Custom Strategy
-
-```python
-from semafs.core.raw import RawPlan
-
-
-class NoopStrategy:
-    async def draft(self, snapshot):
-        return None
-```
-
-## See Also
-
-- [Strategies Guide](/guide/strategies)
-- [LLM Integration](/guide/llm-integration)
-- [Operations](/api/operations)
