@@ -1,329 +1,119 @@
 # Data Model
 
-Deep dive into SemaFS's hierarchical data structure.
+SemaFS 的数据模型围绕两个原则：
 
-## Node Types
+1. **Node ID 是主身份**（稳定）
+2. **Path 是投影**（可演进）
 
-```mermaid
-classDiagram
-    class TreeNode {
-        +id: UUID
-        +parent_path: str
-        +name: str
-        +node_type: NodeType
-        +status: NodeStatus
-        +content: str
-        +payload: Dict
-        +tags: List[str]
-        +is_dirty: bool
-        +version: int
-    }
-
-    class CATEGORY {
-        content = "Summary"
-        is_dirty = true/false
-        +receive_fragment()
-        +apply_plan_result()
-    }
-
-    class LEAF {
-        content = "Full content"
-        is_dirty = false
-        +archive()
-    }
-
-    TreeNode <|-- CATEGORY
-    TreeNode <|-- LEAF
-    CATEGORY *-- TreeNode : contains
-```
-
-### CATEGORY Nodes
-
-**Purpose**: Organizational containers for hierarchical structure.
-
-| Property | Semantics |
-|----------|-----------|
-| `content` | Summary of all descendants |
-| `is_dirty` | Needs maintenance processing |
-| `children` | Can contain CATEGORY and LEAF |
-
-**Behavior**:
-- Receives fragments (marks dirty)
-- Applies plan results (updates summary)
-- Requests semantic rethink (forces LLM)
-
-### LEAF Nodes
-
-**Purpose**: Terminal nodes with atomic knowledge.
-
-| Property | Semantics |
-|----------|-----------|
-| `content` | Complete knowledge unit |
-| `is_dirty` | Always false |
-| `children` | Cannot have children |
-
-**Behavior**:
-- Can be archived (soft-delete)
-- Created by operations (merge, group, move, persist)
-
-## Path System
-
-### NodePath Value Object
+## Node Schema (Conceptual)
 
 ```python
 @dataclass(frozen=True)
-class NodePath:
-    raw: str  # Normalized: lowercase, [a-z0-9_.]
+class Node:
+    id: str
+    parent_id: str | None
+    name: str
+    canonical_path: str
+    node_type: NodeType           # category | leaf
+    content: str | None           # 叶子主内容
+    summary: str | None           # 分类摘要
+    category_meta: dict           # 分类结构化摘要元数据
+    payload: dict                 # 来源、时间、业务字段
+    tags: tuple[str, ...]
+    stage: NodeStage              # active | pending | cold | archived
+    skeleton: bool
+    name_editable: bool
 ```
 
-**Operations**:
+## Node Types
 
-```mermaid
-graph LR
-    P[root.work.meetings]
+### CATEGORY
 
-    P -->|parent| PA[root.work]
-    P -->|name| N[meetings]
-    P -->|depth| D[3]
-    P -->|child standup| C[root.work.meetings.standup]
-    P -->|sibling notes| S[root.work.notes]
-```
+- 语义容器
+- 可有子节点
+- `summary/category_meta` 表示聚合语义
 
-### Path Composition
+### LEAF
 
-Paths are stored decomposed for efficient queries:
+- 原子知识片段
+- 不可有子节点
+- `content` 为主体内容
 
-```
-Full path:    root.work.meetings
-              ↓
-Database:     parent_path = "root.work"
-              name = "meetings"
-```
-
-**Benefits**:
-- Efficient child listing: `WHERE parent_path = ?`
-- Unique constraint: `(parent_path, name)`
-- Cascade rename: Update `parent_path` prefix
-
-## Node Lifecycle
+## Lifecycle Stages
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING_REVIEW: new_fragment()
-
-    state "Maintenance" as M {
-        PENDING_REVIEW --> PROCESSING: start_processing()
-        PROCESSING --> ACTIVE: finish_processing()
-        PROCESSING --> PENDING_REVIEW: fail_processing()
-    }
-
-    ACTIVE --> ARCHIVED: archive()
-    PENDING_REVIEW --> ARCHIVED: archive()
-
-    ARCHIVED --> [*]
+    [*] --> pending: write
+    pending --> active: lifecycle phase
+    active --> cold: rollup windowed archive
+    active --> archived: explicit archive
+    pending --> archived: merged/removed before promotion
+    cold --> archived: compaction or cleanup
 ```
 
-### Status Semantics
+- `pending`: 新写入，待治理
+- `active`: 可读可参与维护
+- `cold`: 已被 rollup 汇总，默认不参与重平衡
+- `archived`: 归档态
 
-| Status | Query Visible | Modifiable | Transitions To |
-|--------|---------------|------------|----------------|
-| PENDING_REVIEW | No (maintenance only) | Read-only | PROCESSING, ARCHIVED |
-| PROCESSING | No | Locked | ACTIVE, PENDING_REVIEW |
-| ACTIVE | Yes | Yes | PROCESSING, ARCHIVED |
-| ARCHIVED | Audit only | No | (terminal) |
+## Path Model
 
-### Status Recovery
+`NodePath` 规则：
+
+- 根路径固定 `root`
+- 合法字符：`[a-z0-9_]` + `.`
+- 规范化后全小写
+
+路径相关对象：
+
+- `nodes.canonical_path`: 当前规范路径（唯一）
+- `node_paths`: `node_id -> canonical_path` 投影索引
+
+## Storage Layout (SQLite)
+
+核心表：
+
+- `nodes`: 真实节点状态（含 stage、payload、meta）
+- `node_paths`: 路径索引与深度信息
+
+关键约束：
+
+- `nodes.id` 主键
+- `nodes.canonical_path` 唯一
+- `uq_nodes_sibling_name(parent_id, name) where is_archived = 0`
+
+## Why ID-first + Path Projection
+
+当 rename/move 发生时：
+
+- `id` 不变，引用关系稳定
+- `canonical_path` 与 `node_paths` 重新投影
+- 读 API 仍可通过 path 查询，但内部流程按 id 保持一致性
+
+这可以显著降低重命名/移动导致的级联错误。
+
+## Snapshot Model
+
+维护流程不直接用“实时树”，而是用快照：
 
 ```python
-# Before processing
-node._original_status = node.status  # Save
-node.status = PROCESSING
-
-# On failure
-node.status = node._original_status  # Restore
+@dataclass(frozen=True)
+class Snapshot:
+    target: Node
+    leaves: tuple[Node, ...]
+    subcategories: tuple[Node, ...]
+    pending: tuple[Node, ...]
+    siblings: tuple[Node, ...]
+    ancestors: tuple[Node, ...]
+    used_paths: frozenset[str]
 ```
 
-## Information Hierarchy
+快照由 `SnapshotBuilder` 基于 `uow.reader` 构建，保证“同事务视角”。
 
-### Precision Gradient
+## Summary Contract
 
-```
-Depth ∝ Specificity
+分类摘要采用 `category_meta -> render_category_summary(meta)` 渲染路径：
 
-root (Depth 0)
-├── "Software engineer, coffee lover, travel enthusiast"  ← Overview
-
-├── preferences (Depth 1)
-│   ├── "Personal preferences across food, work, travel"  ← Domain
-│   │
-│   ├── food (Depth 2)
-│   │   ├── "Food: coffee enthusiast, Japanese cuisine"  ← Topic
-│   │   │
-│   │   └── coffee (Depth 3)
-│   │       └── "Dark roast, Ethiopian, V60 pour-over,   ← Details
-│   │            93°C water, 1:15 ratio"
-```
-
-### Content Propagation
-
-Parents summarize children:
-
-```mermaid
-graph BT
-    C1[coffee: "Dark roast..."]
-    C2[tea: "Green tea..."]
-    F[food: "Beverages: dark roast coffee, green tea..."]
-    P[preferences: "Food and drink preferences..."]
-
-    C1 --> F
-    C2 --> F
-    F --> P
-```
-
-When children change, parent content updates via `apply_plan_result()`.
-
-## Metadata
-
-### Payload
-
-Arbitrary JSON metadata:
-
-```python
-payload = {
-    "source": "meeting",
-    "author": "alice",
-    "confidence": 0.95,
-    "timestamp": "2024-03-15T10:00:00Z",
-    "_force_llm": True,  # Internal flag
-    "_merged": True,     # Track history
-    "_merged_from": ["id1", "id2"]
-}
-```
-
-**Preserved through**:
-- Merge (combined)
-- Move (copied)
-- Persist (kept)
-
-### Tags
-
-Classification labels:
-
-```python
-tags = ["important", "work", "project-x"]
-```
-
-## Dirty Flag System
-
-```mermaid
-sequenceDiagram
-    participant W as write()
-    participant C as Category
-    participant M as maintain()
-
-    W->>C: Receive fragment
-    C->>C: is_dirty = True
-
-    Note over C: Waiting for maintenance...
-
-    M->>C: Process dirty category
-    M->>C: Execute plan
-    M->>C: is_dirty = False
-```
-
-### Dirty Ordering
-
-Categories processed deepest-first:
-
-```
-Dirty categories:     Process order:
-- root               4. root
-- root.work          2. root.work
-- root.work.proj     1. root.work.proj (deepest)
-- root.food          3. root.food
-```
-
-**Reason**: Child changes should propagate up.
-
-## Database Schema
-
-```sql
-CREATE TABLE semafs_nodes (
-    -- Identity
-    id TEXT PRIMARY KEY,
-    parent_path TEXT NOT NULL,
-    name TEXT NOT NULL,
-
-    -- Type & Status
-    node_type TEXT CHECK(node_type IN ('CATEGORY', 'LEAF')),
-    status TEXT CHECK(status IN ('ACTIVE', 'ARCHIVED',
-                                  'PENDING_REVIEW', 'PROCESSING')),
-
-    -- Content
-    content TEXT,
-    display_name TEXT,
-    name_editable INTEGER DEFAULT 1,
-
-    -- Metadata
-    payload TEXT DEFAULT '{}',
-    tags TEXT DEFAULT '[]',
-
-    -- State
-    is_dirty INTEGER DEFAULT 0,
-    version INTEGER DEFAULT 1,
-
-    -- Audit
-    access_count INTEGER DEFAULT 0,
-    created_at TEXT,
-    updated_at TEXT,
-    last_accessed_at TEXT
-);
-```
-
-### Indexes
-
-```sql
--- Unique non-archived paths
-CREATE UNIQUE INDEX idx_unique_path
-    ON semafs_nodes(parent_path, name)
-    WHERE status != 'ARCHIVED';
-
--- Child listing
-CREATE INDEX idx_parent_path ON semafs_nodes(parent_path);
-
--- Status queries
-CREATE INDEX idx_status ON semafs_nodes(status);
-
--- Dirty category fetch
-CREATE INDEX idx_dirty_categories
-    ON semafs_nodes(is_dirty, node_type, status);
-```
-
-## Constraints
-
-### Uniqueness
-
-Non-archived nodes must have unique paths:
-
-```sql
-UNIQUE(parent_path, name) WHERE status != 'ARCHIVED'
-```
-
-**Implication**: Multiple ARCHIVED nodes can share a path (audit trail).
-
-### Path Conflict Resolution
-
-```python
-def resolve_path(parent, name):
-    if not path_exists(f"{parent}.{name}"):
-        return name
-    for i in range(1, 100):
-        if not path_exists(f"{parent}.{name}_{i}"):
-            return f"{name}_{i}"
-```
-
-## See Also
-
-- [Architecture](/design/architecture) - System overview
-- [TreeNode API](/api/node) - Node class reference
-- [Operations](/api/operations) - Tree operations
+- 写库前统一 `normalize_category_meta`
+- 叶子节点 `category_meta` 固定为空
+- 分类摘要来源统一，减少字符串拼接漂移

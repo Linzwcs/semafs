@@ -10,6 +10,9 @@ Unlike traditional memory solutions (vector databases, key-value stores), SemaFS
 - **Automatic Maintenance**: LLM-powered reorganization keeps your knowledge base coherent
 - **Structured Access**: Rich views with navigation context, not just raw data
 
+For the latest value analysis and open-source benchmark:
+[Value & Benchmark](./value-benchmark)
+
 ## Core Concept
 
 ```
@@ -24,13 +27,13 @@ Traditional Memory:           SemaFS Memory:
 Flat, unstructured            Hierarchical, semantic
 ```
 
-## The Write-Maintain-Read Cycle
+## The Write-Sweep-Read Cycle
 
 SemaFS operates in three phases:
 
 ```mermaid
 graph LR
-    W[Write] --> M[Maintain] --> R[Read]
+    W[Write] --> M[Sweep] --> R[Read]
 
     W --> |O 1 latency| F[Fragment]
     F --> |mark dirty| M
@@ -44,7 +47,7 @@ graph LR
 - Parent category marked as "dirty"
 - Returns immediately with fragment ID
 
-### 2. Maintain Phase
+### 2. Sweep Phase
 - Processes all dirty categories
 - LLM creates reorganization plan
 - Executor applies changes atomically
@@ -106,6 +109,8 @@ LLM failure                 → Fallback (safe)
 
 ## Next Steps
 
+- [Value & Benchmark](./value-benchmark) - Latest assessment and open-source comparison
 - [Quick Start](./quickstart) - Get up and running in 5 minutes
 - [Core Concepts](./concepts) - Understand the data model
+- [Design Philosophy](/design/philosophy) - Architecture mindset and trade-offs
 - [Writing Memories](./writing) - Learn the write API

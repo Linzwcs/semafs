@@ -1,266 +1,102 @@
 # SemaFS API
 
-The main facade for interacting with the semantic filesystem.
+`SemaFS` 是对外主入口，负责写入、维护、读取与骨架初始化。
 
-## Class Definition
+## Constructor
 
 ```python
-class SemaFS:
-    def __init__(
-        self,
-        uow_factory: UoWFactory,
-        strategy: Strategy,
-        executor: Optional[Executor] = None,
-        max_children: int = 10,
-        db_name: str = "default"
-    ):
-        """
-        Initialize SemaFS instance.
-
-        Args:
-            uow_factory: Factory for creating transactions
-            strategy: Strategy for reorganization decisions
-            executor: Plan executor (default: creates new Executor)
-            max_children: Threshold for triggering maintenance
-            db_name: Identifier for logging
-        """
+SemaFS(
+    store: NodeStore,
+    uow_factory: UoWFactory,
+    bus: Bus,
+    strategy: Strategy,
+    placer: Placer,
+    summarizer: Summarizer,
+    policy: Policy,
+    budget: Budget = Budget(),
+    terminal_config: TerminalConfig = TerminalConfig(),
+)
 ```
 
-## Write Operations
+## Write & Maintenance
 
-### write()
-
-Write a knowledge fragment to the filesystem.
+### `write()`
 
 ```python
 async def write(
-    self,
-    path: str,
     content: str,
-    payload: Optional[Dict[str, Any]] = None
-) -> str:
-    """
-    Write a fragment to the specified path.
-
-    Args:
-        path: Target category path (e.g., "root.work.meetings")
-        content: Knowledge content to store
-        payload: Optional metadata dictionary
-
-    Returns:
-        Fragment ID (UUID string)
-
-    Raises:
-        InvalidPathError: If path format is invalid
-
-    Example:
-        >>> frag_id = await semafs.write(
-        ...     "root.work",
-        ...     "Completed sprint planning",
-        ...     {"source": "meeting"}
-        ... )
-    """
+    hint: str | None = None,
+    payload: dict | None = None,
+) -> str
 ```
 
-**Path Resolution**: Finds the deepest existing CATEGORY in the path.
+- 写入新片段并返回叶子节点 `id`。
+- `hint` 是写入入口路径，最终落点由 `placer` 决定。
 
-**Fragment Creation**: Creates a PENDING_REVIEW node named `_frag_{random}`.
-
-**Side Effect**: Marks parent category as dirty.
-
-## Read Operations
-
-### read()
-
-Read a single node with navigation context.
+### `sweep()`
 
 ```python
-async def read(self, path: str) -> Optional[NodeView]:
-    """
-    Read a node by path.
-
-    Args:
-        path: Full path to the node
-
-    Returns:
-        NodeView with context, or None if not found
-
-    Example:
-        >>> node = await semafs.read("root.work")
-        >>> print(node.content)
-        >>> print(node.child_count)
-    """
+async def sweep(limit: int | None = None) -> int
 ```
 
-### list()
+- 扫描并处理超载分类，返回本轮处理分类数。
 
-List direct children of a category.
+### `apply_skeleton()`
 
 ```python
-async def list(
-    self,
-    path: str,
-    include_archived: bool = False
-) -> List[NodeView]:
-    """
-    List children of a category.
-
-    Args:
-        path: Parent category path
-        include_archived: Include ARCHIVED nodes
-
-    Returns:
-        List of NodeView objects, sorted by path
-
-    Example:
-        >>> children = await semafs.list("root.work")
-        >>> for child in children:
-        ...     print(child.path)
-    """
+async def apply_skeleton(
+    skeleton: dict | list[str] | tuple[str, ...] | str,
+    *,
+    source: str = "manual",
+) -> int
 ```
 
-### view_tree()
+- 批量创建/标记骨架分类。
+- 骨架分类会被设置为 `skeleton=True` 且 `name_editable=False`。
+- 返回新增/更新的节点数。
 
-Get recursive tree structure.
+## Read APIs
+
+### `read(path)`
 
 ```python
-async def view_tree(
-    self,
-    path: str,
-    max_depth: int = 10
-) -> Optional[TreeView]:
-    """
-    Get tree view starting from path.
-
-    Args:
-        path: Root path for the tree
-        max_depth: Maximum recursion depth
-
-    Returns:
-        TreeView with recursive children, or None if not found
-
-    Example:
-        >>> tree = await semafs.view_tree("root", max_depth=3)
-        >>> print(tree.total_nodes)
-        >>> print(tree.leaf_count)
-    """
+async def read(path: str) -> NodeView | None
 ```
 
-### get_related()
-
-Get navigation context around a node.
+### `list(path)`
 
 ```python
-async def get_related(self, path: str) -> Optional[RelatedNodes]:
-    """
-    Get related nodes for navigation.
-
-    Args:
-        path: Target node path
-
-    Returns:
-        RelatedNodes with parent, siblings, children, ancestors
-
-    Example:
-        >>> related = await semafs.get_related("root.work")
-        >>> print(related.parent.path)
-        >>> print([s.path for s in related.siblings])
-    """
+async def list(path: str) -> list[NodeView]
 ```
 
-### stats()
-
-Get knowledge base statistics.
+### `tree(path="root", max_depth=3)`
 
 ```python
-async def stats(self) -> StatsView:
-    """
-    Get overall statistics.
-
-    Returns:
-        StatsView with counts and metrics
-
-    Example:
-        >>> stats = await semafs.stats()
-        >>> print(f"Total nodes: {stats.total_nodes}")
-        >>> print(f"Pending maintenance: {stats.dirty_categories}")
-    """
+async def tree(path: str = "root", max_depth: int = 3) -> TreeView | None
 ```
 
-## Maintenance Operations
-
-### maintain()
-
-Process all dirty categories.
+### `related(path)`
 
 ```python
-async def maintain(self) -> int:
-    """
-    Run maintenance on all dirty categories.
-
-    Returns:
-        Number of categories processed
-
-    Processing Order:
-        Deepest categories first (leaf-to-root)
-
-    Example:
-        >>> processed = await semafs.maintain()
-        >>> print(f"Organized {processed} categories")
-    """
+async def related(path: str) -> RelatedNodes | None
 ```
 
-**Strategy Invocation**: Calls `strategy.create_plan()` for each dirty category.
-
-**Atomic Execution**: Each category is processed in its own transaction.
-
-**Error Handling**: Failed categories are logged but don't stop processing.
-
-## Complete Example
+### `stats()`
 
 ```python
-import asyncio
-from semafs import SemaFS
-from semafs.storage.sqlite import SQLiteUoWFactory
-from semafs.strategies.hybrid import HybridStrategy
-from semafs.infra.llm.openai import OpenAIAdapter
-from openai import AsyncOpenAI
-
-async def main():
-    # Setup
-    factory = SQLiteUoWFactory("knowledge.db")
-    await factory.init()
-
-    client = AsyncOpenAI()
-    adapter = OpenAIAdapter(client, model="gpt-4o-mini")
-    strategy = HybridStrategy(adapter, max_nodes=8)
-
-    semafs = SemaFS(factory, strategy, max_children=10)
-
-    # Write
-    await semafs.write("root.work", "Sprint planning completed")
-    await semafs.write("root.work", "API documentation updated")
-
-    # Maintain
-    processed = await semafs.maintain()
-    print(f"Processed: {processed}")
-
-    # Read
-    tree = await semafs.view_tree("root", max_depth=3)
-    stats = await semafs.stats()
-
-    print(f"Total nodes: {stats.total_nodes}")
-    print(f"Categories: {stats.total_categories}")
-    print(f"Leaves: {stats.total_leaves}")
-
-    # Cleanup
-    await factory.close()
-
-asyncio.run(main())
+async def stats() -> StatsView
 ```
 
-## See Also
+返回统计项包括：
 
-- [TreeNode](/api/node) - Node class reference
-- [Views](/api/views) - View objects reference
-- [Strategy](/api/strategy) - Strategy protocol
+- `total_categories`
+- `total_leaves`
+- `max_depth`
+- `dirty_categories`
+- `top_categories`
+
+## Notes
+
+- 当前主维护入口是 `sweep()`（没有 `maintain()`）。
+- 当前树读取入口是 `tree()`（没有 `view_tree()`）。
+- 当前邻接读取入口是 `related()`（没有 `get_related()`）。

@@ -1,345 +1,79 @@
 # Transaction Model
 
-ACID guarantees and transaction management in SemaFS.
+SemaFS 的事务模型基于 Unit of Work（UoW），强调“集中 staging + 原子提交”。
 
-## Unit of Work Pattern
-
-All changes are staged before commit:
-
-```mermaid
-graph LR
-    subgraph "Staging Area"
-        N[New Nodes]
-        D[Dirty Nodes]
-        R[Renames]
-    end
-
-    N & D & R --> C{commit()}
-    C -->|Success| DB[(Database)]
-    C -->|Failure| RB[rollback()]
-```
-
-## UnitOfWork API
+## Core Contracts
 
 ```python
-class UnitOfWork:
-    def register_new(self, node: TreeNode) -> None:
-        """Stage for INSERT."""
+class UnitOfWork(Protocol):
+    reader: TxReader
 
-    def register_dirty(self, node: TreeNode) -> None:
-        """Stage for UPDATE."""
+    def register_new(self, node: Node) -> None: ...
+    def register_dirty(self, node: Node) -> None: ...
+    def register_removed(self, node_id: str) -> None: ...
+    def register_rename(self, node_id: str, new_name: str) -> None: ...
+    def register_move(self, node_id: str, new_parent_id: str) -> None: ...
 
-    def register_cascade_rename(
-        self, old_path: str, new_path: str
-    ) -> None:
-        """Stage path rename with descendants."""
-
-    async def commit(self) -> None:
-        """Persist all changes atomically."""
-
-    async def rollback(self) -> None:
-        """Discard all staged changes."""
+    async def commit(self) -> None: ...
+    async def rollback(self) -> None: ...
 ```
 
-## Commit Order
+## Single-Transaction Write
 
-Changes apply in specific order for integrity:
+`write()` 的典型语义：
 
-```mermaid
-sequenceDiagram
-    participant UoW as Unit of Work
-    participant DB as Database
+1. `uow_factory.begin()` 打开事务
+2. staging：新叶子 + 相关父节点更新
+3. `commit()` 一次提交
+4. 提交后发布事件
 
-    UoW->>DB: 1. UPDATE dirty nodes
-    Note right of DB: Existing nodes updated first
+这保证写入路径可预测、失败可回滚。
 
-    UoW->>DB: 2. INSERT new nodes
-    Note right of DB: New nodes can reference updated parents
+## Commit Internals (SQLite UoW)
 
-    UoW->>DB: 3. CASCADE renames
-    Note right of DB: Path changes propagate to descendants
+当前实现会在一次 `commit()` 内完成：
 
-    UoW->>DB: 4. COMMIT
-    Note right of DB: All or nothing
-```
+1. 插入 `register_new`
+2. 更新 `register_dirty`
+3. 应用 `register_rename`
+4. 应用 `register_move`
+5. 应用 `register_removed`（归档）
+6. 重算 `canonical_path`
+7. 刷新 `node_paths` 投影
 
-### Why This Order?
+若任一步骤异常：整体 rollback。
 
-1. **Updates before inserts**: New nodes may reference updated parents
-2. **Inserts before cascades**: Cascade updates existing paths
-3. **Atomic commit**: Either all succeed or none
+## Transaction-aware Reads
 
-## Transaction Boundaries
+`TxReader` 绑定到当前事务连接，供维护流程读取：
 
-### Implicit Transactions
+- `get_by_id/get_by_path`
+- `resolve_path/canonical_path`
+- `list_children/list_siblings/get_ancestors`
+- `all_paths`
 
-Most operations manage their own transactions:
+意义：决策快照与落库提交共享同一事务视图。
 
-```python
-# write() internally:
-async def write(self, path, content, payload):
-    async with self.factory.begin() as uow:
-        # ... create fragment ...
-        uow.register_new(fragment)
-        uow.register_dirty(parent)
-        await uow.commit()
-```
+## Isolation Strategy
 
-### Explicit Transactions
+并发控制采用两层：
 
-For custom multi-step operations:
+1. 应用层：`Keeper` 对同一 node reconcile 加锁
+2. 存储层：SQLite `BEGIN IMMEDIATE` 序列化写事务
 
-```python
-async with factory.begin() as uow:
-    # All changes staged
-    node1 = TreeNode.new_leaf(...)
-    uow.register_new(node1)
+这样可以减少并发写冲突与部分提交状态。
 
-    node2.content = "updated"
-    uow.register_dirty(node2)
+## Failure & Recovery
 
-    # Single atomic commit
-    await uow.commit()
-```
+- UoW context manager 在异常时触发 rollback
+- 事务内失败不会泄露半成状态
+- 事件发布位于事务提交之后，避免“事件成功但数据未落库”
 
-### Maintenance Transactions
+## Why It Matters
 
-Maintenance uses multiple transactions:
+对语义记忆系统来说，错误的“部分成功”比“显式失败”更危险。
 
-```mermaid
-sequenceDiagram
-    participant M as maintain()
-    participant U as UoW
+SemaFS 通过 UoW 模型保证：
 
-    rect rgb(200, 220, 240)
-        Note over M,U: Tx 1: Lock
-        M->>U: register_dirty(nodes → PROCESSING)
-        M->>U: commit()
-    end
-
-    Note over M: LLM call (outside tx)
-
-    rect rgb(200, 240, 220)
-        Note over M,U: Tx 2: Execute
-        M->>U: register_new/dirty (operations)
-        M->>U: commit()
-    end
-
-    rect rgb(240, 220, 200)
-        Note over M,U: Tx 3: Finish
-        M->>U: register_dirty(nodes → ACTIVE)
-        M->>U: commit()
-    end
-```
-
-**Rationale**:
-- LLM calls shouldn't hold locks
-- Each phase recoverable independently
-- Clear transaction boundaries
-
-## ACID Properties
-
-### Atomicity
-
-All changes in a UoW commit together or not at all:
-
-```python
-async with factory.begin() as uow:
-    uow.register_new(node1)
-    uow.register_new(node2)
-    # If commit fails, neither is persisted
-    await uow.commit()
-```
-
-### Consistency
-
-Constraints enforced:
-
-```sql
--- Unique non-archived paths
-UNIQUE(parent_path, name) WHERE status != 'ARCHIVED'
-```
-
-If violated, transaction rolls back.
-
-### Isolation
-
-Context snapshots prevent interference:
-
-```python
-# Frozen context for maintenance
-context = UpdateContext(
-    active_nodes=tuple(...),   # Immutable
-    pending_nodes=tuple(...)   # Immutable
-)
-# Other writes don't affect this maintenance
-```
-
-### Durability
-
-SQLite WAL mode ensures persistence:
-
-```python
-# After commit(), changes survive crashes
-await uow.commit()
-```
-
-## Error Handling
-
-### Automatic Rollback
-
-Context manager handles errors:
-
-```python
-async with factory.begin() as uow:
-    uow.register_new(node)
-    raise ValueError("Something wrong")
-    # Automatic rollback on exception
-```
-
-### Manual Rollback
-
-Explicit rollback when needed:
-
-```python
-uow = await factory.begin()
-try:
-    uow.register_new(node)
-    if some_condition:
-        await uow.rollback()
-        return
-    await uow.commit()
-except Exception:
-    await uow.rollback()
-    raise
-```
-
-### Status Recovery
-
-PROCESSING nodes restored on failure:
-
-```python
-# Before processing
-node._original_status = node.status
-node.status = PROCESSING
-
-# On failure
-node.status = node._original_status  # Restored
-```
-
-## Cascade Renames
-
-When a category is renamed, descendants update:
-
-```mermaid
-graph TB
-    subgraph "Before Rename"
-        A1[root.old_name]
-        B1[root.old_name.child1]
-        C1[root.old_name.child2]
-        A1 --> B1 & C1
-    end
-
-    subgraph "After Rename"
-        A2[root.new_name]
-        B2[root.new_name.child1]
-        C2[root.new_name.child2]
-        A2 --> B2 & C2
-    end
-
-    A1 -.->|cascade| A2
-    B1 -.->|auto update| B2
-    C1 -.->|auto update| C2
-```
-
-### Implementation
-
-```python
-async def cascade_rename(self, old_path: str, new_path: str):
-    # Update all nodes where parent_path starts with old_path
-    await self.conn.execute("""
-        UPDATE semafs_nodes
-        SET parent_path = ? || substr(parent_path, ?)
-        WHERE parent_path LIKE ? || '%'
-    """, (new_path, len(old_path) + 1, old_path))
-```
-
-## Conflict Resolution
-
-### Path Conflicts
-
-When creating nodes, paths are made unique:
-
-```python
-def ensure_unique_path(parent_path, name):
-    full_path = f"{parent_path}.{name}"
-    if not path_exists(full_path):
-        return name
-
-    # Try numbered suffixes
-    for i in range(1, 100):
-        candidate = f"{name}_{i}"
-        if not path_exists(f"{parent_path}.{candidate}"):
-            return candidate
-
-    raise ConflictError("Cannot find unique path")
-```
-
-### Batch Conflicts
-
-Within a single execution, track used paths:
-
-```python
-class Executor:
-    def execute(self, plan, context, uow):
-        self._used_paths = set()  # Track this batch
-
-        for op in plan.ops:
-            path = self._resolve_path(...)
-            self._used_paths.add(path)
-```
-
-## Best Practices
-
-### 1. Short Transactions
-
-```python
-# Good: Quick commit
-async with factory.begin() as uow:
-    uow.register_dirty(node)
-    await uow.commit()
-
-# Bad: Long-running work in transaction
-async with factory.begin() as uow:
-    await slow_llm_call()  # Holds resources
-    await uow.commit()
-```
-
-### 2. Explicit Boundaries
-
-```python
-# Clear about what's atomic
-async with factory.begin() as uow:
-    # These two changes are atomic
-    uow.register_new(child)
-    parent.child_count += 1
-    uow.register_dirty(parent)
-    await uow.commit()
-```
-
-### 3. Handle Failures
-
-```python
-try:
-    await semafs.maintain()
-except Exception as e:
-    # Individual category failures are logged
-    # but don't stop overall processing
-    logger.error(f"Maintenance error: {e}")
-```
-
-## See Also
-
-- [Architecture](/design/architecture) - System overview
-- [Maintenance System](/design/maintenance) - Transaction usage
-- [Repository API](/api/repository) - Storage interface
+- 要么结构更新全部生效
+- 要么系统保持原状并等待下一轮重试

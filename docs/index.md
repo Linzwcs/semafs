@@ -13,6 +13,9 @@ hero:
       text: Get Started
       link: /guide/introduction
     - theme: alt
+      text: Value & Benchmark
+      link: /guide/value-benchmark
+    - theme: alt
       text: View on GitHub
       link: https://github.com/linzwcs/semafs
 
@@ -37,36 +40,15 @@ features:
     details: Hexagonal design with clean ports & adapters. Swap storage, LLM providers, or strategies easily.
 ---
 
-<style>
-:root {
-  --vp-home-hero-name-color: transparent;
-  --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #3eaf7c 30%, #42b983);
-  --vp-home-hero-image-background-image: linear-gradient(-45deg, #3eaf7c50 50%, #42b98350 50%);
-  --vp-home-hero-image-filter: blur(40px);
-}
-</style>
+## Quick Example (Latest API)
 
-## Quick Example
+```bash
+# Write two fragments into root.preferences and run one maintenance sweep
+semafs write "I love dark roast coffee" --hint root.preferences --sweep
+semafs write "Ethiopian beans are my favorite" --hint root.preferences --sweep
 
-```python
-from semafs import SemaFS
-from semafs.storage.sqlite import SQLiteUoWFactory
-from semafs.strategies.hybrid import HybridStrategy
-
-# Initialize
-factory = SQLiteUoWFactory("memory.db")
-await factory.init()
-semafs = SemaFS(factory, HybridStrategy(llm_adapter))
-
-# Write memories
-await semafs.write("root.preferences", "I love dark roast coffee")
-await semafs.write("root.preferences", "Ethiopian beans are my favorite")
-
-# Auto-organize (LLM merges similar memories)
-await semafs.maintain()
-
-# Read with context
-tree = await semafs.view_tree("root", max_depth=2)
+# Read structured tree
+semafs tree root --max-depth 2
 ```
 
 ## The Problem
@@ -99,3 +81,14 @@ root/
 ::: tip Key Insight
 Human knowledge is hierarchical. LLM memory should be too.
 :::
+
+## Why SemaFS Now
+
+`SemaFS` is strongest when you need **deterministic + explainable memory maintenance**:
+
+- Reliable write path with transaction boundaries (SQLite UoW)
+- Hybrid maintenance (`rules + LLM`) with guardrails and graceful fallback
+- Hierarchical summaries for token-efficient retrieval
+
+For a full evaluation and open-source benchmark, see:
+[Value & Benchmark](/guide/value-benchmark)

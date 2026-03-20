@@ -1,362 +1,96 @@
 # Maintenance System
 
-How SemaFS automatically organizes knowledge.
+SemaFS 维护系统的目标是：在不牺牲写入可靠性的前提下，持续优化语义结构。
 
-## Overview
+## Trigger Model
 
-Maintenance transforms a collection of fragments into a coherent knowledge structure:
+维护有两条入口：
+
+1. 事件驱动：`write()` 后发布事件，由 `Pulse` 触发 `Keeper.reconcile`
+2. 批处理驱动：`sweep(limit)` 扫描 overflow 分类并执行 reconcile
+
+## Reconcile Pipeline
 
 ```mermaid
 graph LR
-    subgraph "Before"
-        B1[_frag_1]
-        B2[_frag_2]
-        B3[_frag_3]
-        B4[existing_leaf]
-    end
-
-    subgraph "After"
-        A1[merged_leaf]
-        A2[grouped/]
-        A3[moved_leaf]
-    end
-
-    B1 & B2 --> A1
-    B3 --> A2
-    B4 --> A3
+    A[Build Snapshot] --> B[RebalancePhase]
+    B --> C[RollupPhase]
+    C --> D[LifecyclePhase]
+    D --> E[SummaryPhase]
+    E --> F[Commit]
+    F --> G[Publish Events]
+    G --> H[PropagationPhase]
 ```
 
-## Maintenance Loop
+## Phase Responsibilities
+
+### RebalancePhase
+
+- `strategy.draft(snapshot)` 生成 RawPlan
+- `PlanGuard` 做 raw/plan 双层校验
+- `Resolver` 解析短 ID/目标路径为可执行 `Plan`
+- `Executor` 将 `Plan` 翻译为 UoW staging 动作
+
+### RollupPhase
+
+- 在终端深度满足条件时触发
+- 将一批历史叶子汇总为 rollup 叶子
+- 原叶子转为 `cold`
+
+### LifecyclePhase
+
+- 将 `pending` 子节点晋升为 `active`
+- 生成 `Persisted` 事件
+
+### SummaryPhase
+
+- 基于当前子节点重算分类摘要
+- 更新 `category_meta` 与 `summary`
+
+### PropagationPhase
+
+- 根据策略信号判断是否向父级传播
+- 形成局部到上层的渐进式语义更新
+
+## Why Phase-based
+
+- 降低单文件/单函数复杂度
+- 每个阶段可以独立测试与回归
+- 便于替换局部策略（例如 rollup 策略）
+
+## Guarded Execution
+
+维护执行采用“先验证、后落库”模型：
 
 ```mermaid
-sequenceDiagram
-    participant S as SemaFS
-    participant R as Repository
-    participant St as Strategy
-    participant E as Executor
-
-    S->>R: list_dirty_categories()
-    R-->>S: [cat1, cat2, cat3] (sorted by depth desc)
-
-    loop Each dirty category
-        S->>R: build_context(category)
-        R-->>S: UpdateContext
-
-        alt No changes needed
-            S->>R: clear_dirty()
-        else Needs processing
-            S->>S: mark_nodes_processing()
-
-            S->>St: create_plan(context, max_children)
-            St-->>S: RebalancePlan
-
-            S->>E: execute(plan, context, uow)
-            E-->>S: changes applied
-
-            S->>S: finish_processing()
-            S->>R: clear_dirty()
-        end
-    end
+graph TD
+    RP[RawPlan from LLM] --> G1[validate_raw_plan]
+    G1 --> R[Resolver.compile]
+    R --> G2[validate_plan]
+    G2 --> EX[Executor.execute]
+    EX --> UOW[UoW commit]
 ```
 
-## Context Capture
+这意味着：LLM 输出不会直接触发数据变更。
 
-Before processing, a snapshot is captured:
+## Concurrency Model
 
-```python
-context = UpdateContext(
-    parent=category,           # The dirty category
-    active_nodes=(...),        # ACTIVE children
-    pending_nodes=(...),       # PENDING_REVIEW fragments
-    sibling_categories=(...),  # Parent's sibling categories
-    ancestor_categories=(...)  # Ancestor chain (max 3)
-)
-```
+- `Keeper` 对单节点 reconcile 使用 lock 串行化
+- SQLite 写事务使用 `BEGIN IMMEDIATE` 串行提交
+- 快照读取优先通过 `uow.reader` 保持事务一致性
 
-### Parallel Fetch
+## Operability
 
-```python
-# Efficient: parallel queries
-children, siblings, ancestors = await asyncio.gather(
-    repo.list_children(path),
-    repo.list_sibling_categories(path),
-    repo.get_ancestor_categories(path, max_depth=3)
-)
-```
+每轮 reconcile 产出 `ReconcileMetrics`，包含：
 
-### Context Immutability
+- `rebalance_tried/rebalance_done`
+- `promoted/rolled_up/summary_changed/propagated`
+- `guard_rejects/guard_codes`
 
-```python
-@dataclass(frozen=True)  # Immutable
-class UpdateContext:
-    active_nodes: Tuple[TreeNode, ...]   # Frozen tuple
-    pending_nodes: Tuple[TreeNode, ...]  # Frozen tuple
-```
+这为线上观测和回归分析提供统一维度。
 
-**Benefits**:
-- No mid-execution changes
-- Safe for concurrent access
-- Consistent LLM prompts
+## Failure Semantics
 
-## Strategy Decision
-
-```mermaid
-graph TB
-    S[HybridStrategy.create_plan]
-
-    S --> F{force_llm?}
-    F -->|Yes| LLM[Call LLM]
-    F -->|No| P{Has pending?}
-
-    P -->|No| T{Over threshold?}
-    P -->|Yes| T
-
-    T -->|No, no pending| SKIP[Return None]
-    T -->|No, has pending| RULE[Use Rules]
-    T -->|Yes| LLM
-
-    LLM -->|Success| PLAN[RebalancePlan]
-    LLM -->|Failure| FALL[Fallback]
-    FALL --> RULE
-    RULE --> PLAN
-```
-
-### Decision Matrix
-
-| Pending? | Over Threshold? | force_llm? | Action |
-|----------|-----------------|------------|--------|
-| No | No | No | Skip (None) |
-| Yes | No | No | Rules |
-| No | Yes | No | LLM |
-| Yes | Yes | No | LLM |
-| Any | Any | Yes | LLM |
-
-## Plan Execution
-
-### Execution Order
-
-Operations execute sequentially in tuple order:
-
-```python
-for op in plan.ops:
-    if isinstance(op, MergeOp):
-        await executor._do_merge(op, context, uow)
-    elif isinstance(op, GroupOp):
-        await executor._do_group(op, context, uow)
-    elif isinstance(op, MoveOp):
-        await executor._do_move(op, context, uow)
-    elif isinstance(op, PersistOp):
-        await executor._do_persist(op, context, uow)
-```
-
-### ID Resolution
-
-```python
-def resolve(node_id: str) -> Optional[TreeNode]:
-    # Try full UUID
-    if node_id in context_map:
-        return context_map[node_id]
-
-    # Try 8-char prefix (from LLM prompts)
-    for full_id, node in context_map.items():
-        if full_id.startswith(node_id[:8]):
-            return node
-
-    return None  # Invalid ID, skip
-```
-
-### Error Tolerance
-
-| Error | Behavior |
-|-------|----------|
-| Invalid node ID | Skip operation, log warning |
-| Node is CATEGORY (merge) | Skip that node |
-| Target doesn't exist (move) | Skip operation |
-| Insufficient nodes (merge/group) | Skip operation |
-
-## Parent Updates
-
-After operations, the parent category is updated:
-
-```python
-# Apply new content
-parent.content = plan.updated_content
-
-# Optional rename
-if plan.updated_name:
-    old_path = parent.path
-    parent.name = plan.updated_name
-    uow.register_cascade_rename(old_path, parent.path)
-```
-
-## Semantic Floating
-
-When deep changes affect parent semantics:
-
-```mermaid
-graph BT
-    subgraph "Depth 3"
-        D3[GroupOp creates tech/frontend/]
-    end
-
-    subgraph "Depth 2"
-        D2[work/ gets new subcategory]
-    end
-
-    subgraph "Depth 1"
-        D1[root is dirtied]
-    end
-
-    D3 -->|should_dirty_parent| D2
-    D2 -->|semantic float| D1
-```
-
-### Trigger
-
-```python
-if plan.should_dirty_parent and context.parent.parent_path:
-    grandparent = await repo.get_by_path(parent.parent_path)
-    grandparent.request_semantic_rethink()  # _force_llm = True
-    uow.register_dirty(grandparent)
-```
-
-### Effect
-
-Next `maintain()` call:
-1. Grandparent is in dirty list
-2. `force_llm` flag triggers LLM analysis
-3. Parent summary potentially rewritten
-
-## Transaction Boundaries
-
-### Multiple Transactions
-
-```mermaid
-sequenceDiagram
-    participant S as SemaFS
-    participant U as UoW
-
-    rect rgb(200, 220, 240)
-        Note over S,U: Transaction 1: Lock nodes
-        S->>U: mark_processing()
-        S->>U: commit()
-    end
-
-    Note over S: Strategy runs outside transaction
-
-    rect rgb(200, 240, 220)
-        Note over S,U: Transaction 2: Apply plan
-        S->>U: execute(plan)
-        S->>U: commit()
-    end
-
-    rect rgb(240, 220, 200)
-        Note over S,U: Transaction 3: Finish
-        S->>U: finish_processing()
-        S->>U: clear_dirty()
-        S->>U: commit()
-    end
-```
-
-**Why separate?**:
-- LLM calls can be slow (don't hold locks)
-- Each phase can fail independently
-- Clear recovery points
-
-## Error Recovery
-
-### Per-Category Recovery
-
-```python
-async def _maintain_one(self, path: str) -> bool:
-    try:
-        # ... processing ...
-        return True
-    except Exception as e:
-        logger.error(f"Failed {path}: {e}")
-        await self._safe_rollback_processing(nodes)
-        return False
-```
-
-### Status Restoration
-
-```python
-async def _safe_rollback_processing(self, nodes):
-    for node in nodes:
-        if node.status == NodeStatus.PROCESSING:
-            node.fail_processing()  # Restore original
-            uow.register_dirty(node)
-    await uow.commit()
-```
-
-### Dirty Flag Persistence
-
-Failed categories remain dirty:
-
-```python
-# Category fails maintenance
-# is_dirty stays True
-# Next maintain() will retry
-```
-
-## Performance Optimization
-
-### Batch Processing
-
-```python
-# Write many fragments
-for content in contents:
-    await semafs.write("root.work", content)
-
-# Single maintenance pass
-await semafs.maintain()  # Processes once per category
-```
-
-### Threshold Tuning
-
-```python
-# Lower threshold = more LLM calls, better organization
-strategy = HybridStrategy(adapter, max_nodes=5)
-
-# Higher threshold = fewer calls, more basic organization
-strategy = HybridStrategy(adapter, max_nodes=15)
-```
-
-### Parallel Context Fetch
-
-```python
-# Parallel database queries
-children, siblings, ancestors = await asyncio.gather(
-    repo.list_children(path),
-    repo.list_sibling_categories(path),
-    repo.get_ancestor_categories(path, max_depth=3)
-)
-```
-
-## Monitoring
-
-### Dirty Count
-
-```python
-stats = await semafs.stats()
-print(f"Pending: {stats.dirty_categories}")
-```
-
-### Verbose Logging
-
-```python
-import logging
-logging.getLogger("semafs").setLevel(logging.DEBUG)
-
-await semafs.maintain()
-# DEBUG: Processing root.work (depth=2)
-# DEBUG: Context: 5 active, 3 pending
-# DEBUG: Strategy: LLM plan with MERGE×1, GROUP×1
-# DEBUG: Execution complete
-```
-
-## See Also
-
-- [Architecture](/design/architecture) - System overview
-- [Tree Operations](/guide/operations) - Operation details
-- [Strategies](/guide/strategies) - Strategy configuration
+- 任一阶段异常会触发事务回滚（当前 UoW）
+- 失败不会污染已提交状态
+- 下轮 sweep/事件可继续重试，具备最终收敛能力

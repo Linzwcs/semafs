@@ -2,6 +2,11 @@
 
 Understanding SemaFS's atomic operation guarantees.
 
+::: warning API Migration Note
+Examples in this page may reference legacy names (`maintain`, old strategy hooks).
+Use [SemaFS API](/api/semafs) as source of truth for current entrypoints and signatures.
+:::
+
 ## Overview
 
 SemaFS uses the **Unit of Work** pattern to ensure atomic operations:

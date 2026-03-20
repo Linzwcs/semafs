@@ -1,197 +1,79 @@
 # Writing Memories
 
-Learn how to write knowledge fragments to SemaFS.
+Use the latest write API to append knowledge fragments.
 
-## Basic Write
+## API
 
 ```python
-fragment_id = await semafs.write(
-    path="root.work",
-    content="Completed sprint planning meeting",
-    payload={"source": "meeting", "date": "2024-03-15"}
+leaf_id = await semafs.write(
+    content="Completed sprint planning",
+    hint="root.work",
+    payload={"source": "meeting", "date": "2026-03-20"},
 )
 ```
 
 ### Parameters
 
 | Parameter | Type | Description |
-|-----------|------|-------------|
-| `path` | `str` | Target category path |
-| `content` | `str` | Knowledge content |
-| `payload` | `dict` | Optional metadata |
+|---|---|---|
+| `content` | `str` | Required fragment text |
+| `hint` | `str \| None` | Preferred entry path (defaults to `root`) |
+| `payload` | `dict \| None` | Optional metadata JSON |
 
-### Return Value
+### Return
 
-Returns the fragment ID (UUID string) for tracking.
+- Returns leaf node id (`str`).
 
-## Path Resolution
+## How Placement Works
 
-When you write to a path, SemaFS finds the **deepest existing category**:
+- `hint` is an entry path, not a guaranteed final leaf path.
+- The configured `placer` decides target category.
+- With `HintPlacer`, content stays at the hinted path.
 
-```python
-# Existing structure:
-# root/
-# └── work/
-
-await semafs.write("root.work.meetings.standup", "Daily standup notes")
-# Result: Fragment created under "root.work" (deepest existing)
-# Name: "_frag_abc123"
-# Parent path: "root.work"
-```
-
-If the exact path exists and is a CATEGORY, the fragment is created there.
-
-## Fragment Naming
-
-Fragments are automatically named with a random suffix:
-
-```python
-# Fragment names follow pattern: _frag_{8_hex_chars}
-"_frag_a1b2c3d4"
-"_frag_e5f6g7h8"
-```
-
-During maintenance, fragments are renamed to meaningful names by the LLM.
-
-## Metadata (Payload)
-
-The `payload` parameter stores arbitrary JSON metadata:
+## Metadata Guidelines
 
 ```python
 await semafs.write(
-    path="root.work",
-    content="API documentation updated",
+    content="API docs updated",
+    hint="root.engineering.docs",
     payload={
-        "source": "commit",
+        "source": "git",
         "author": "alice",
-        "commit_sha": "abc123",
-        "confidence": 0.95,
-        "tags": ["documentation", "api"]
-    }
+        "tags": ["docs", "api"],
+        "confidence": 0.93,
+    },
 )
 ```
 
-Metadata is preserved through merge and move operations.
+Use payload for provenance and filtering context, not for large text blobs.
 
-## Write and Maintain
-
-For immediate organization, call `maintain()` after writing:
+## Batch Writing Pattern
 
 ```python
-# Write multiple fragments
-await semafs.write("root.food", "Love dark roast coffee")
-await semafs.write("root.food", "Ethiopian beans are best")
-await semafs.write("root.food", "No sugar please")
+for text in [
+    "User prefers async status updates",
+    "Meeting notes should be concise",
+    "Focus hours: 9-11am",
+]:
+    await semafs.write(content=text, hint="root.work")
 
-# Organize immediately
-await semafs.maintain()
-
-# Fragments are now merged/grouped
+# Optional: sweep overloaded categories
+await semafs.sweep(limit=20)
 ```
 
-## Batch Writing
+## Current vs Old API
 
-For multiple writes, consider batching:
+Use this now:
 
-```python
-import asyncio
+- `write(content=..., hint=..., payload=...)`
 
-fragments = [
-    ("root.work", "Sprint planning done", {}),
-    ("root.work", "API docs updated", {}),
-    ("root.personal", "Buy coffee beans", {}),
-]
+Do not use old examples like:
 
-# Write all fragments
-ids = await asyncio.gather(*[
-    semafs.write(path, content, payload)
-    for path, content, payload in fragments
-])
-
-# Single maintenance pass
-await semafs.maintain()
-```
-
-## Forcing LLM Analysis
-
-To force LLM reorganization (even under threshold), use `_force_llm` in payload:
-
-```python
-await semafs.write(
-    path="root.important",
-    content="Critical insight that needs smart organization",
-    payload={"_force_llm": True}
-)
-
-# maintain() will use LLM regardless of node count
-await semafs.maintain()
-```
-
-## Transaction Safety
-
-Each write is atomic:
-
-```python
-async with factory.begin() as uow:
-    # All changes in this block are atomic
-    semafs = SemaFS(factory, strategy)
-    await semafs.write("root.work", "Note 1", {})
-    await semafs.write("root.work", "Note 2", {})
-    # Commits automatically on exit
-```
-
-If any write fails, all changes in the transaction roll back.
-
-## Best Practices
-
-### 1. Write to Appropriate Depth
-
-```python
-# Good: Write to existing category
-await semafs.write("root.work", "Meeting notes")
-
-# Better: Be specific if category exists
-await semafs.write("root.work.meetings", "Standup notes")
-```
-
-### 2. Include Useful Metadata
-
-```python
-await semafs.write(
-    path="root.research",
-    content="Interesting paper on transformers",
-    payload={
-        "source": "arxiv",
-        "url": "https://arxiv.org/...",
-        "read_date": "2024-03-15"
-    }
-)
-```
-
-### 3. Batch Related Writes
-
-```python
-# Process all meeting notes together
-for note in meeting_notes:
-    await semafs.write("root.meetings", note)
-
-# Single maintenance pass
-await semafs.maintain()
-```
-
-### 4. Avoid Duplicate Content
-
-The LLM will merge duplicates, but it's more efficient to dedupe before writing:
-
-```python
-# Check if similar content exists
-existing = await semafs.view_tree("root.work", max_depth=1)
-# ... dedupe logic ...
-await semafs.write("root.work", new_content, {})
-```
+- `write(path=..., content=...)`
+- `maintain()`
 
 ## Next Steps
 
-- [Reading & Querying](./reading) - Retrieve your knowledge
-- [Maintenance](./maintenance) - How organization works
-- [Core Concepts](./concepts) - Understand the data model
+- [Reading & Querying](./reading) - Get structured context back
+- [Maintenance](./maintenance) - Event-driven reconcile and `sweep(limit)`
+- [Core Concepts](./concepts) - Node lifecycle and path rules

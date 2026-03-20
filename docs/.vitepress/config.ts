@@ -7,6 +7,14 @@ export default withMermaid(
     description: 'Semantic Filesystem for LLM Memory',
 
     head: [
+      ['style', {}, `
+        :root {
+          --vp-home-hero-name-color: transparent;
+          --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #3eaf7c 30%, #42b983);
+          --vp-home-hero-image-background-image: linear-gradient(-45deg, #3eaf7c50 50%, #42b98350 50%);
+          --vp-home-hero-image-filter: blur(40px);
+        }
+      `],
       ['link', { rel: 'icon', href: '/logo.svg' }],
       ['meta', { name: 'theme-color', content: '#3eaf7c' }],
       ['meta', { name: 'og:type', content: 'website' }],
@@ -36,6 +44,7 @@ export default withMermaid(
             text: 'Getting Started',
             items: [
               { text: 'Introduction', link: '/guide/introduction' },
+              { text: 'Value & Benchmark', link: '/guide/value-benchmark' },
               { text: 'Quick Start', link: '/guide/quickstart' },
               { text: 'Core Concepts', link: '/guide/concepts' },
             ]
@@ -76,10 +85,13 @@ export default withMermaid(
           {
             text: 'System Design',
             items: [
+              { text: 'Design Philosophy', link: '/design/philosophy' },
+              { text: 'ADR Records', link: '/design/adr' },
               { text: 'Architecture', link: '/design/architecture' },
               { text: 'Data Model', link: '/design/data-model' },
               { text: 'Maintenance System', link: '/design/maintenance' },
               { text: 'Transaction Model', link: '/design/transactions' },
+              { text: 'Evolution Roadmap', link: '/design/evolution' },
             ]
           }
         ]

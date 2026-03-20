@@ -2,6 +2,12 @@
 
 Understanding the fundamental building blocks of SemaFS.
 
+::: warning API Migration Note
+Some legacy method names in this page are being updated.
+Canonical read/write/maintenance APIs are `write(...)`, `sweep(...)`, `tree(...)`, and `related(...)`.
+See [SemaFS API](/api/semafs) for the latest signatures.
+:::
+
 ## Node Types
 
 Every piece of knowledge in SemaFS is stored as a **TreeNode**. There are two types:
