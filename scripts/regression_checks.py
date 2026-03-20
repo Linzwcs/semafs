@@ -19,6 +19,7 @@ from semafs.core.summary import (
 )
 from semafs.engine.guard import PlanGuard, GuardRejectCode
 from semafs.engine.keeper import Keeper
+from semafs.engine.phases import ReconcileMetrics
 from semafs.engine.resolver import Resolver
 from semafs.infra.storage.sqlite.store import SQLiteStore
 from semafs.infra.storage.sqlite.uow import SQLiteUnitOfWork
@@ -421,9 +422,7 @@ def _guard_metrics_aggregate_check() -> None:
     )
     _, report_a = PlanGuard().validate_raw_plan(raw)
     _, report_b = PlanGuard().validate_plan(Plan(ops=()))
-    total, counts = Keeper._guard_metrics(  # noqa: SLF001
-        reports=(report_a, report_b)
-    )
+    total, counts = ReconcileMetrics.from_guard_reports([report_a, report_b])
     assert total == 1
     assert counts.get("RAW_MERGE_NO_EVIDENCE", 0) == 1
 
