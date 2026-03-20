@@ -117,7 +117,7 @@ export default withMermaid(
 
       footer: {
         message: 'Released under the MIT License.',
-        copyright: 'Copyright © 2024-present SemaFS Contributors',
+        copyright: 'Copyright © 2026 SemaFS Contributors',
       },
 
       search: {
