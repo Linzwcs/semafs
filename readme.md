@@ -1,5 +1,7 @@
 # SemaFS
 
+[Documentation](https://linzwcs.github.io/semafs/) | [Demo Cases](./demos/README.md) |  [Issues](https://github.com/linzwcs/semafs/issues)
+
 Semantic filesystem for LLM memory.
 
 SemaFS stores knowledge fragments in a canonical tree (`root.*`) and automatically maintains structure through event-driven reconcile. The project provides four runtime surfaces:
