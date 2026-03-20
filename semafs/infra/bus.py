@@ -1,5 +1,3 @@
-"""InMemoryBus - Simple in-process event bus."""
-
 from typing import Callable, Awaitable
 
 from ..core.events import TreeEvent
@@ -25,7 +23,3 @@ class InMemoryBus:
     ) -> None:
         """Register handler for event type."""
         self._handlers.setdefault(event_type, []).append(handler)
-
-
-# Backward-compatible alias while codebase migrates to shorter naming.
-InMemoryEventBus = InMemoryBus
