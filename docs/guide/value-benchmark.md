@@ -13,12 +13,6 @@ Current strengths observed in the latest codebase:
 - **Structured reads**: `read`, `list`, `tree`, `related`, `stats` for hierarchical and navigable context
 - **Deployment surface**: unified CLI (`semafs ...`) + web server/viewer entrypoints
 
-Local evidence used for this snapshot:
-
-- latest commit: `feat(cli): add unified CLI, web serve, and viewer entrypoints` (2026-03-20)
-- smoke script: `run_latest_semafs_smoke.py` passed
-- regression checks: `scripts/regression_checks.py` passed (with `PYTHONPATH=.`)
-
 ## Value Assessment
 
 ### 1) Product Value
@@ -55,21 +49,6 @@ This is a strong position for enterprise/agent workflows that cannot accept opaq
 | [Graphiti](https://github.com/getzep/graphiti) | Temporal knowledge graph memory | Rich graph/temporal relation modeling | Lower conceptual overhead for filesystem-like memory |
 | [LlamaIndex](https://github.com/run-llama/llama_index) | Retrieval/index ecosystem breadth | Many retrieval/index strategies out of the box | Native hierarchical memory maintenance flow |
 
-## What to Borrow From the Best OSS
-
-Priority improvements inspired by top projects:
-
-1. **Workflow composability (LangGraph)**  
-   Add first-class workflow hooks/events around `write -> sweep -> read` for orchestration frameworks.
-2. **Memory quality lifecycle (Mem0 / LangMem)**  
-   Introduce explicit memory scoring, decay, and retention policies.
-3. **Temporal semantics (Zep / Graphiti)**  
-   Add optional time-aware edges/events to represent evolving user facts.
-4. **Retriever interoperability (LlamaIndex)**  
-   Expose adapters to use SemaFS tree nodes directly in popular retriever pipelines.
-5. **Benchmark suite as contract**  
-   Publish stable benchmark tasks: latency, mutation quality, token-efficiency, and consistency under concurrency.
-
 ## Recommended Positioning
 
 Use SemaFS as:
@@ -79,8 +58,3 @@ Use SemaFS as:
 
 Do not position it as a full replacement for every vector/search stack. Position it as the **memory governance layer** for long-lived agent systems.
 
-## Next Actions for Docs
-
-1. Keep all examples on latest API names (`write`, `sweep`, `tree`, `related`, `stats`).
-2. Add one production blueprint page: `SemaFS + LangGraph` and `SemaFS + LlamaIndex`.
-3. Publish benchmark methodology and reproducible scripts in `docs/design/`.
