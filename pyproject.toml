@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 name = "semafs"
 version = "0.2.1"
 description = "A semantic filesystem that uses LLM-powered strategies to automatically organize knowledge fragments"
-readme = "README.md"
+readme = "readme.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
@@ -39,9 +39,17 @@ openai = [
 anthropic = [
     "anthropic>=0.18.0",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 all = [
     "openai>=2.24.0",
     "anthropic>=0.18.0",
+    "mcp>=1.0.0",
+]
+server = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -53,6 +61,8 @@ dev = [
 
 [project.scripts]
 semafs = "semafs.cli:main"
+semafs-serve = "semafs.serve:main"
+semafs-viewer = "semafs.view:view"
 
 [project.urls]
 
