@@ -343,6 +343,7 @@ class SQLiteUnitOfWork(UnitOfWork):
                        "FROM nodes WHERE is_archived = 0")
         rows = cursor.fetchall()
         by_id = {row["id"]: row for row in rows}
+        self._assert_acyclic_parent_graph(by_id)
         children: dict[str, set[str]] = defaultdict(set)
         for row in rows:
             parent_id = row["parent_id"]
@@ -390,6 +391,49 @@ class SQLiteUnitOfWork(UnitOfWork):
                 (path, node_id),
             )
 
+    @staticmethod
+    def _assert_acyclic_parent_graph(by_id: dict[str, sqlite3.Row]) -> None:
+        """Reject parent graphs that contain self-parent or descendant cycles."""
+        state: dict[str, int] = {}
+        stack: list[str] = []
+
+        def visit(node_id: str) -> None:
+            status = state.get(node_id, 0)
+            if status == 2:
+                return
+            if status == 1:
+                if node_id in stack:
+                    start = stack.index(node_id)
+                    cycle_ids = stack[start:] + [node_id]
+                else:
+                    cycle_ids = stack + [node_id]
+                raise ValueError(
+                    "Cycle detected while recomputing paths, "
+                    f"node_id={node_id}, cycle={' -> '.join(cycle_ids)}"
+                )
+
+            state[node_id] = 1
+            stack.append(node_id)
+            parent_id = by_id[node_id]["parent_id"]
+            if parent_id is not None:
+                if parent_id == node_id:
+                    raise ValueError(
+                        "Self-parent detected while recomputing paths, "
+                        f"node_id={node_id}"
+                    )
+                if parent_id not in by_id:
+                    raise ValueError(
+                        "Orphan active node detected while recomputing paths: "
+                        f"node_id={node_id}, missing_parent_id={parent_id}"
+                    )
+                visit(parent_id)
+            stack.pop()
+            state[node_id] = 2
+
+        for node_id in by_id:
+            if state.get(node_id, 0) != 2:
+                visit(node_id)
+
     def _collect_impacted_ids(
         self,
         by_id: dict[str, sqlite3.Row],
@@ -435,4 +479,3 @@ class SQLiteUnitOfWork(UnitOfWork):
                 """,
                 (row["id"], path, depth),
             )
-

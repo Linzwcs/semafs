@@ -27,7 +27,7 @@ class GroupOp:
 class MoveOp:
     """Move a leaf to an existing category."""
 
-    leaf_id: str  # ID to move
+    leaf_id: str  # ID of moved leaf
     target_path: str  # Target category path (resolved)
 
 
@@ -89,3 +89,4 @@ class Plan:
     def has_name_update(self) -> bool:
         """Check if plan updates parent name."""
         return self.updated_name is not None
+

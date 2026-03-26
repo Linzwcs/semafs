@@ -3,8 +3,8 @@
 from .node import Node, NodePath, NodeType, NodeStage
 from .capacity import Budget, Zone
 from .events import Merged, Grouped, Moved, Persisted, Placed
-from .ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
-from .raw import RawPlan, RawMerge, RawGroup, RawMove, RawRename
+from .plan.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
+from .plan.raw import RawPlan, RawMerge, RawGroup, RawMove, RawRename
 from .snapshot import Snapshot
 from .placement import (
     PlacementAction,
@@ -20,6 +20,8 @@ from .summary import (
     normalize_category_meta,
     render_category_summary,
 )
+from .plan.pipeline import PlanIssue, PassTrace, PlanArtifact, CompileResult
+from .timestamps import utc_now_rfc3339, normalize_rfc3339
 
 __all__ = [
     "Node",
@@ -55,6 +57,12 @@ __all__ = [
     "build_category_meta",
     "normalize_category_meta",
     "render_category_summary",
+    "PlanIssue",
+    "PassTrace",
+    "PlanArtifact",
+    "CompileResult",
+    "utc_now_rfc3339",
+    "normalize_rfc3339",
     "SemaFSError",
     "NodeNotFoundError",
     "InvalidPathError",

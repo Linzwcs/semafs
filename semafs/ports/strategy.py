@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from ..core.raw import RawPlan
+from ..core.plan.raw import RawPlan
 from ..core.snapshot import Snapshot
 
 

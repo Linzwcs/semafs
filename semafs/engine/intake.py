@@ -1,12 +1,12 @@
 """Intake - Write pipeline for new content."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from uuid import uuid4
 
 from ..core.node import Node, NodeStage
 from ..core.placement import PlacementRoute
 from ..core.naming import PathAllocator
+from ..core.timestamps import normalize_rfc3339, utc_now_rfc3339
 from ..core.events import Placed
 from ..ports.factory import UnitOfWork
 from ..ports.placer import Placer
@@ -78,10 +78,13 @@ class Intake:
 
         # Create pending leaf
         merged_payload = dict(payload or {})
-        merged_payload.setdefault(
-            "_ingested_at",
-            datetime.now(timezone.utc).isoformat(),
-        )
+        written_at = utc_now_rfc3339()
+        merged_payload.setdefault("_ingested_at", written_at)
+        event_at = self._extract_event_timestamp(merged_payload)
+        merged_payload["_timestamps"] = {
+            "written_at": written_at,
+            "event_at": event_at,
+        }
         merged_payload["_placement"] = self._build_placement_payload(
             hint=hint,
             target_path=target_path,
@@ -160,3 +163,12 @@ class Intake:
             "reasoning": route.reasoning,
             "steps": steps,
         }
+
+    @staticmethod
+    def _extract_event_timestamp(payload: dict) -> str | None:
+        for key in ("event_time", "occurred_at", "_ingested_at"):
+            value = payload.get(key)
+            normalized = normalize_rfc3339(value if isinstance(value, str) else None)
+            if normalized:
+                return normalized
+        return None

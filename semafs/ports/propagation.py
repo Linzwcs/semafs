@@ -12,9 +12,9 @@ class Signal:
     """Immutable propagation signal carried through the tree."""
 
     value: float
-    origin: str              # Path that originally triggered propagation
-    event_type: str          # Name of the triggering event class
-    depth: int = 0           # Current propagation depth
+    origin: str  # Path that originally triggered propagation
+    event_type: str  # Name of the triggering event class
+    depth: int = 0  # Current propagation depth
     payload: dict[str, Any] = field(default_factory=dict)
 
 

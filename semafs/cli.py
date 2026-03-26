@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -18,6 +19,7 @@ from typing import Optional
 from .algo import (
     DefaultPolicy,
     HybridStrategy,
+    LLMPlanReviewer,
     LLMSummarizer,
     LLMRecursivePlacer,
     PlacementConfig,
@@ -25,9 +27,12 @@ from .algo import (
 from .infra.bus import InMemoryBus
 from .infra.storage.sqlite.store import SQLiteStore
 from .infra.storage.sqlite.uow import SQLiteUoWFactory
+from .logging_utils import configure_logging
 from .renderer import JSONRenderer, TextRenderer
 from .semafs import SemaFS
 from .view import view as viewer_main
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,7 @@ async def build_runtime(args: argparse.Namespace) -> Runtime:
         placer=placer,
         summarizer=summarizer,
         policy=policy,
+        plan_reviewer=LLMPlanReviewer(adapter),
     )
     return Runtime(semafs=semafs, store=store)
 
@@ -122,10 +128,28 @@ async def _cmd_write(args: argparse.Namespace) -> int:
         hint=args.hint,
         payload=payload,
     )
-    print(leaf_id)
+    leaf = await runtime.store.get_by_id(leaf_id)
+    written_at = None
+    event_at = None
+    if leaf and isinstance(leaf.payload, dict):
+        ts = leaf.payload.get("_timestamps", {})
+        if isinstance(ts, dict):
+            written_at = ts.get("written_at")
+            event_at = ts.get("event_at")
+    logger.info(
+        "write.result=%s",
+        json.dumps(
+            {
+                "leaf_id": leaf_id,
+                "written_at": written_at,
+                "event_at": event_at,
+            },
+            ensure_ascii=False,
+        ),
+    )
     if args.sweep:
         changed = await runtime.semafs.sweep(limit=args.sweep_limit)
-        print(f"sweep.changed={changed}")
+        logger.info("sweep.changed=%s", changed)
     return 0
 
 
@@ -133,12 +157,12 @@ async def _cmd_read(args: argparse.Namespace) -> int:
     runtime = await build_runtime(args)
     view = await runtime.semafs.read(args.path)
     if not view:
-        print("Not found")
+        logger.warning("read.not_found path=%s", args.path)
         return 1
     if args.output == "json":
-        print(JSONRenderer.render_node(view))
+        logger.info("%s", JSONRenderer.render_node(view))
     else:
-        print(TextRenderer.render_node(view))
+        logger.info("%s", TextRenderer.render_node(view))
     return 0
 
 
@@ -146,11 +170,13 @@ async def _cmd_list(args: argparse.Namespace) -> int:
     runtime = await build_runtime(args)
     views = await runtime.semafs.list(args.path)
     if args.output == "json":
-        print(json.dumps([v.path for v in views], ensure_ascii=False,
-                         indent=2))
+        logger.info(
+            "%s",
+            json.dumps([v.path for v in views], ensure_ascii=False, indent=2),
+        )
     else:
         for view in views:
-            print(view.path)
+            logger.info("%s", view.path)
     return 0
 
 
@@ -158,12 +184,15 @@ async def _cmd_tree(args: argparse.Namespace) -> int:
     runtime = await build_runtime(args)
     tree = await runtime.semafs.tree(path=args.path, max_depth=args.max_depth)
     if not tree:
-        print("Not found")
+        logger.warning("tree.not_found path=%s", args.path)
         return 1
     if args.output == "json":
-        print(JSONRenderer.render_tree(tree))
+        logger.info("%s", JSONRenderer.render_tree(tree))
     else:
-        print(TextRenderer.render_tree(tree, show_content=args.show_content))
+        logger.info(
+            "%s",
+            TextRenderer.render_tree(tree, show_content=args.show_content),
+        )
     return 0
 
 
@@ -171,22 +200,27 @@ async def _cmd_stats(args: argparse.Namespace) -> int:
     runtime = await build_runtime(args)
     stats = await runtime.semafs.stats()
     if args.output == "json":
-        print(JSONRenderer.render_stats(stats))
+        logger.info("%s", JSONRenderer.render_stats(stats))
     else:
-        print(TextRenderer.render_stats(stats))
+        logger.info("%s", TextRenderer.render_stats(stats))
     return 0
 
 
 async def _cmd_sweep(args: argparse.Namespace) -> int:
     runtime = await build_runtime(args)
     changed = await runtime.semafs.sweep(limit=args.limit)
-    print(changed)
+    logger.info("sweep.changed=%s", changed)
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="SemaFS command line interface")
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help="Log level (env fallback: SEMAFS_LOG_LEVEL)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_runtime_common(p: argparse.ArgumentParser) -> None:
@@ -220,8 +254,21 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     # serve
-    p_serve = sub.add_parser("serve", help="Run MCP server over stdio")
+    p_serve = sub.add_parser("serve", help="Run MCP server over HTTP or stdio")
     add_runtime_common(p_serve)
+    p_serve.add_argument(
+        "--transport",
+        choices=("http", "streamable-http", "stdio", "sse"),
+        default="http",
+        help="MCP transport mode",
+    )
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host for HTTP/SSE")
+    p_serve.add_argument("--port", type=int, default=8000, help="Bind port for HTTP/SSE")
+    p_serve.add_argument(
+        "--path",
+        default="/mcp",
+        help="Streamable HTTP endpoint path",
+    )
 
     # view
     p_view = sub.add_parser("view", help="Run viewer server")
@@ -293,6 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(args.log_level, force=True)
 
     if args.command == "serve":
         try:
@@ -306,9 +354,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 base_url=args.base_url,
                 placement_max_depth=args.placement_max_depth,
                 placement_min_confidence=args.placement_min_confidence,
+                transport=args.transport,
+                host=args.host,
+                port=args.port,
+                path=args.path,
             )
         except Exception as exc:  # pragma: no cover - CLI error path
-            print(f"Error: {exc}")
+            logger.error("Error: %s", exc)
             return 1
         return 0
 
@@ -337,7 +389,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.command == "sweep":
             return asyncio.run(_cmd_sweep(args))
     except Exception as exc:  # pragma: no cover - CLI error path
-        print(f"Error: {exc}")
+        logger.error("Error: %s", exc)
         return 1
 
     parser.print_help()

@@ -1,5 +1,3 @@
-"""Shared semantic/naming rules used across planner pipeline."""
-
 from __future__ import annotations
 
 import re
@@ -12,24 +10,84 @@ CATEGORY_UPDATED_NAME_RE = re.compile(r"^[a-z]+$")
 CATEGORY_SEGMENT_RE = re.compile(r"^[a-z]+$")
 _NON_ALPHA_RE = re.compile(r"[^a-z]+")
 _TOKEN_RE = re.compile(r"[a-z]{3,}")
+_SEMANTIC_TOKEN_RE = re.compile(r"[a-z]{3,}")
+
 _GENERIC_PATTERN = re.compile(
     r"^(group|batch|misc|temp|tmp|other|others|general|"
-    r"newrecords|records?)([a-z0-9]*)$"
-)
+    r"newrecords|records?)([a-z0-9]*)$")
 
-GENERIC_CATEGORY_NAMES: frozenset[str] = frozenset(
-    {
-        "new_records",
-        "records",
-        "misc",
-        "others",
-        "other",
-        "temp",
-        "tmp",
-        "untitled",
-        "general",
-    }
-)
+_SEMANTIC_STOPWORDS = frozenset({
+    "and",
+    "or",
+    "the",
+    "a",
+    "an",
+    "of",
+    "to",
+    "in",
+    "on",
+    "for",
+    "with",
+    "from",
+    "by",
+    "is",
+    "are",
+    "be",
+    "this",
+    "that",
+    "under",
+    "into",
+    "within",
+    "across",
+    "category",
+    "categories",
+    "group",
+    "groups",
+    "cluster",
+    "clusters",
+    "related",
+    "semantic",
+    "subtree",
+    "notes",
+    "items",
+    "item",
+})
+_WEAK_PREFIX_TOKENS = frozenset({
+    "best",
+    "core",
+    "main",
+    "general",
+    "misc",
+    "other",
+    "topic",
+    "topics",
+})
+_SEMANTIC_FAMILIES = (frozenset({
+    "work",
+    "workflow",
+    "practice",
+    "practices",
+    "process",
+    "processes",
+    "task",
+    "tasks",
+    "operation",
+    "operations",
+    "procedure",
+    "procedures",
+}), )
+
+GENERIC_CATEGORY_NAMES: frozenset[str] = frozenset({
+    "new_records",
+    "records",
+    "misc",
+    "others",
+    "other",
+    "temp",
+    "tmp",
+    "untitled",
+    "general",
+})
 
 
 def is_generic_category_name(name: str | None) -> bool:
@@ -114,7 +172,7 @@ def is_name_locked_node(node: "Node") -> bool:
     """
     Whether category node name is locked by policy.
 
-    Moved from guard.py to core/rules.py to:
+    Centralized in core/rules.py to:
     1. Eliminate infra -> engine reverse dependency
     2. Make rule available to all layers
     """
@@ -123,3 +181,89 @@ def is_name_locked_node(node: "Node") -> bool:
     if node.node_type != NodeType.CATEGORY:
         return False
     return not node.name_editable
+
+
+def canonical_semantic_token(token: str) -> str:
+    """Normalize token for semantic overlap checks."""
+    text = re.sub(r"[^a-z]", "", (token or "").strip().lower())
+    if not text:
+        return ""
+
+    if text.endswith("ies") and len(text) > 4:
+        text = text[:-3] + "y"
+    elif text.endswith(("ches", "shes", "sses", "xes", "zes")):
+        text = text[:-2]
+    elif text.endswith("s") and not text.endswith("ss") and len(text) > 3:
+        text = text[:-1]
+    return text
+
+
+def extract_semantic_tokens(*texts: str) -> frozenset[str]:
+    """Extract normalized semantic tokens from free text."""
+    out: set[str] = set()
+    for text in texts:
+        lowered = (text or "").lower()
+        for raw in _SEMANTIC_TOKEN_RE.findall(lowered):
+            token = canonical_semantic_token(raw)
+            if not token or token in _SEMANTIC_STOPWORDS:
+                continue
+            out.add(token)
+    return frozenset(out)
+
+
+def semantic_overlap_ratio(
+    left_tokens: set[str] | frozenset[str],
+    right_tokens: set[str] | frozenset[str],
+) -> float:
+    """Compute overlap ratio over smaller token set."""
+    left = set(left_tokens)
+    right = set(right_tokens)
+    if not left or not right:
+        return 0.0
+    shared = left & right
+    if not shared:
+        return 0.0
+    base = min(len(left), len(right))
+    if base <= 0:
+        return 0.0
+    return len(shared) / float(base)
+
+
+def is_lexical_variant_name(left: str, right: str) -> bool:
+    """Return True when two category names are lexical near-duplicates."""
+    a = re.sub(r"[^a-z]", "", (left or "").strip().lower())
+    b = re.sub(r"[^a-z]", "", (right or "").strip().lower())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) >= 4 and len(longer) - len(shorter) <= 2:
+        if longer.startswith(shorter) or longer.endswith(shorter):
+            return True
+    if (len(shorter) >= 6
+            and (longer.startswith(shorter) or longer.endswith(shorter))):
+        return True
+    if (shorter in _WEAK_PREFIX_TOKENS and len(shorter) >= 4
+            and len(longer) - len(shorter) >= 5
+            and (longer.startswith(shorter) or longer.endswith(shorter))):
+        return True
+
+    if canonical_semantic_token(a) == canonical_semantic_token(b):
+        return True
+    return same_semantic_family(a, b)
+
+
+def same_semantic_family(left: str, right: str) -> bool:
+    """Return True when two names belong to same coarse semantic family."""
+    a = canonical_semantic_token(left)
+    b = canonical_semantic_token(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    for family in _SEMANTIC_FAMILIES:
+        if a in family and b in family:
+            return True
+    return False

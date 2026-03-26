@@ -65,3 +65,4 @@ class RawPlan:
     updated_keywords: tuple[str, ...] = ()
     updated_name: Optional[str] = None
     reasoning: Optional[str] = None
+

@@ -28,9 +28,8 @@ class DefaultPolicy(Policy):
     """
 
     event_weights: dict[type[TreeEvent], float] = field(
-        default_factory=lambda: dict(_DEFAULT_WEIGHTS)
-    )
-    decay: float = 0.7
+        default_factory=lambda: dict(_DEFAULT_WEIGHTS))
+    decay: float = 0.8
     threshold: float = 0.3
 
     def __post_init__(self):
@@ -38,14 +37,11 @@ class DefaultPolicy(Policy):
             raise ValueError(f"decay must be in (0, 1], got {self.decay}")
         if not (0 <= self.threshold <= 1):
             raise ValueError(
-                f"threshold must be in [0, 1], got {self.threshold}"
-            )
+                f"threshold must be in [0, 1], got {self.threshold}")
         for evt_type, weight in self.event_weights.items():
             if weight < 0:
-                raise ValueError(
-                    f"weight for {evt_type.__name__} must be "
-                    f"non-negative, got {weight}"
-                )
+                raise ValueError(f"weight for {evt_type.__name__} must be "
+                                 f"non-negative, got {weight}")
 
     def seed(self, event: TreeEvent, target_path: str) -> Signal:
         """Event -> initial Signal."""
@@ -75,4 +71,3 @@ class DefaultPolicy(Policy):
             return Step(next_signal, False, "below_threshold")
 
         return Step(next_signal, True, "propagate")
-

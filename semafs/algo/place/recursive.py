@@ -76,6 +76,9 @@ class LLMRecursivePlacer(Placer):
                         "name": child.name,
                         "path": child.path.value,
                         "summary": child.summary or "",
+                        "keywords": self._child_keywords(child),
+                        "skeleton": bool(child.skeleton),
+                        "name_editable": bool(child.name_editable),
                     } for child in children
                 ),
             )
@@ -114,6 +117,24 @@ class LLMRecursivePlacer(Placer):
             child for child in children
             if child.node_type == NodeType.CATEGORY
         ]
+
+    @staticmethod
+    def _child_keywords(child: Node) -> str:
+        meta = child.category_meta if isinstance(child.category_meta, dict) else {}
+        raw = meta.get("keywords")
+        if not isinstance(raw, list):
+            return ""
+        out = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            token = item.strip().lower()
+            if not token:
+                continue
+            out.append(token)
+            if len(out) >= 6:
+                break
+        return ", ".join(out)
 
     @staticmethod
     def _resolve_target_child(

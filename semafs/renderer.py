@@ -16,16 +16,23 @@ class TextRenderer:
         lines = []
         if show_breadcrumb:
             lines.append(f"Path: {' > '.join(view.breadcrumb)}")
+        lines.append(f"Observed At: {view.observed_at}")
         lines.append(f"Type: {'Category' if view.is_category else 'Leaf'}")
         if view.is_category:
             lines.append(f"Children: {view.child_count}")
             lines.append(f"Siblings: {view.sibling_count}")
+        timestamps = JSONRenderer._node_timestamps(view)  # noqa: SLF001
+        if timestamps:
+            lines.append(
+                f"Timestamps: {json.dumps(timestamps, ensure_ascii=False)}")
         content = view.node.content or view.node.summary or ""
         lines.append(f"\nContent:\n{content}")
         return "\n".join(lines)
 
     @staticmethod
-    def render_tree(view: TreeView, indent: str = "  ", show_content: bool = False) -> str:
+    def render_tree(view: TreeView,
+                    indent: str = "  ",
+                    show_content: bool = False) -> str:
         lines = []
         name = view.node.name
         if view.node.node_type == NodeType.CATEGORY:
@@ -183,34 +190,58 @@ class JSONRenderer:
             "path": view.path,
             "type": "category" if view.is_category else "leaf",
             "breadcrumb": list(view.breadcrumb),
+            "observed_at": view.observed_at,
             "content": view.node.content or view.node.summary or "",
             "child_count": view.child_count,
             "sibling_count": view.sibling_count,
+            "timestamps": JSONRenderer._node_timestamps(view),
         }
         return json.dumps(data, ensure_ascii=False, indent=2)
 
     @staticmethod
+    def _node_timestamps(view: NodeView) -> Dict[str, Any]:
+        payload = view.node.payload if isinstance(view.node.payload,
+                                                  dict) else {}
+        ts = payload.get("_timestamps", {})
+        if not isinstance(ts, dict):
+            ts = {}
+        # Backfill for legacy payloads if needed.
+        if "_ingested_at" in payload and "written_at" not in ts:
+            ts = dict(ts)
+            ts["written_at"] = payload.get("_ingested_at")
+        return {k: v for k, v in ts.items() if v}
+
+    @staticmethod
     def render_tree(view: TreeView) -> str:
+
         def _to_dict(v: TreeView) -> Dict[str, Any]:
             return {
                 "path": v.path,
-                "type": "category" if v.node.node_type == NodeType.CATEGORY else "leaf",
+                "type": "category"
+                if v.node.node_type == NodeType.CATEGORY else "leaf",
                 "content": v.node.content or v.node.summary or "",
                 "depth": v.depth,
                 "children": [_to_dict(c) for c in v.children],
             }
+
         return json.dumps(_to_dict(view), ensure_ascii=False, indent=2)
 
     @staticmethod
     def render_stats(stats: StatsView) -> str:
         data = {
-            "total_nodes": stats.total_nodes,
-            "total_categories": stats.total_categories,
-            "total_leaves": stats.total_leaves,
-            "max_depth": stats.max_depth,
-            "dirty_categories": stats.dirty_categories,
-            "top_categories": [
-                {"path": p, "child_count": c} for p, c in stats.top_categories
-            ],
+            "total_nodes":
+            stats.total_nodes,
+            "total_categories":
+            stats.total_categories,
+            "total_leaves":
+            stats.total_leaves,
+            "max_depth":
+            stats.max_depth,
+            "dirty_categories":
+            stats.dirty_categories,
+            "top_categories": [{
+                "path": p,
+                "child_count": c
+            } for p, c in stats.top_categories],
         }
         return json.dumps(data, ensure_ascii=False, indent=2)

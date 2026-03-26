@@ -2,8 +2,8 @@
 
 from uuid import uuid4
 
-from ..core.raw import RawPlan, RawMerge, RawGroup, RawMove, RawRename
-from ..core.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
+from ..core.plan.raw import RawPlan, RawMerge, RawGroup, RawMove, RawRename
+from ..core.plan.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
 from ..core.node import NodeType
 from ..core.naming import PathAllocator
 from ..core.rules import (

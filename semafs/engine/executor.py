@@ -1,7 +1,7 @@
 """Executor - executes resolved Plans."""
 
 from ..core.node import Node
-from ..core.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
+from ..core.plan.ops import Plan, MergeOp, GroupOp, MoveOp, RenameOp
 from ..core.summary import build_category_meta, render_category_summary
 from ..core.events import Merged, Grouped, Moved
 from ..core.snapshot import Snapshot
@@ -27,33 +27,34 @@ class Executor:
         events: list[Merged | Grouped | Moved] = []
 
         # Build ID index (supports both full UUIDs and 8-char short IDs)
-        id_index = self._build_id_index(snapshot)
+        leaf_index = self._build_leaf_index(snapshot)
+        category_index = self._build_category_index(snapshot)
         path_index = self._build_path_index(snapshot)
 
         # Execute each operation
         for op in plan.ops:
             if isinstance(op, MergeOp):
-                event = self._do_merge(op, snapshot, id_index, uow)
+                event = self._do_merge(op, snapshot, leaf_index, uow)
                 if event:
                     events.append(event)
 
             elif isinstance(op, GroupOp):
-                event = self._do_group(op, snapshot, id_index, uow)
+                event = self._do_group(op, snapshot, leaf_index, uow)
                 if event:
                     events.append(event)
 
             elif isinstance(op, MoveOp):
-                event = self._do_move(op, snapshot, id_index, path_index, uow)
+                event = self._do_move(op, snapshot, leaf_index, path_index, uow)
                 if event:
                     events.append(event)
 
             elif isinstance(op, RenameOp):
-                self._do_rename(op, id_index, uow)
+                self._do_rename(op, category_index, uow)
 
         return events
 
-    def _build_id_index(self, snapshot: Snapshot) -> dict[str, Node]:
-        """Build index mapping both full IDs and short IDs to nodes."""
+    def _build_leaf_index(self, snapshot: Snapshot) -> dict[str, Node]:
+        """Build index mapping both full IDs and short IDs to leaf nodes."""
         index: dict[str, Node] = {}
 
         for node in snapshot.leaves + snapshot.pending:
@@ -62,7 +63,12 @@ class Executor:
             # Short ID (first 8 chars)
             index[node.id[:8]] = node
 
-        for node in snapshot.subcategories:
+        return index
+
+    def _build_category_index(self, snapshot: Snapshot) -> dict[str, Node]:
+        """Build index mapping both full IDs and short IDs to categories."""
+        index: dict[str, Node] = {}
+        for node in (snapshot.target,) + snapshot.subcategories:
             index[node.id] = node
             index[node.id[:8]] = node
 
@@ -246,7 +252,10 @@ class Executor:
         if not target:
             return None
 
-        # Create moved node
+        # Skip no-op move: same parent already.
+        if source.parent_id == target.id:
+            return None
+
         # Register changes
         uow.register_move(source.id, target.id)
 

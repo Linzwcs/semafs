@@ -10,23 +10,21 @@ from uuid import uuid4
 from ..core.capacity import Zone
 from ..core.events import TreeEvent, Persisted
 from ..core.node import Node, NodeStage, NodeType
-from ..core.ops import Plan, RenameOp
+from ..core.plan.pipeline import PlanIssue
+from ..core.plan.ops import Plan, RenameOp
 from ..core.snapshot import Snapshot
 from ..core.summary import (
     build_category_meta,
     normalize_category_meta,
-    render_category_summary,
 )
 from ..core.terminal import TerminalConfig, TerminalGroupMode, TerminalPolicy
 from ..ports.factory import UoWFactory, UnitOfWork
+from ..ports.compiler import PlanCompiler
 from ..ports.propagation import Context, Policy, Signal
 from ..ports.store import NodeStore
-from ..ports.strategy import Strategy
 from ..ports.summarizer import Summarizer
 
 from .executor import Executor
-from .guard import GuardReport, PlanGuard
-from .resolver import Resolver
 from .builder import SnapshotBuilder
 
 logger = logging.getLogger(__name__)
@@ -52,8 +50,8 @@ class ReconcileMetrics:
     summary_changed: bool = False
     propagated: bool = False
     events: int = 0
-    guard_rejects: int = 0
-    guard_codes: dict[str, int] = field(default_factory=dict)
+    validation_rejects: int = 0
+    validation_codes: dict[str, int] = field(default_factory=dict)
     pending_events: list = field(default_factory=list)
 
     def as_log_payload(self) -> dict:
@@ -70,19 +68,18 @@ class ReconcileMetrics:
             "summary_changed": self.summary_changed,
             "propagated": self.propagated,
             "events": self.events,
-            "guard_rejects": self.guard_rejects,
-            "guard_codes": self.guard_codes,
+            "validation_rejects": self.validation_rejects,
+            "validation_codes": self.validation_codes,
         }
 
     @staticmethod
-    def from_guard_reports(
-        reports: list[GuardReport], ) -> tuple[int, dict[str, int]]:
-        """Aggregate guard metrics from reports."""
-        total = sum(r.total_rejects for r in reports)
+    def from_issues(
+        issues: tuple[PlanIssue, ...], ) -> tuple[int, dict[str, int]]:
+        """Aggregate structured issue metrics."""
+        total = len(issues)
         codes: dict[str, int] = {}
-        for r in reports:
-            for code, count in r.counts_by_code().items():
-                codes[code] = codes.get(code, 0) + count
+        for issue in issues:
+            codes[issue.code] = codes.get(issue.code, 0) + 1
         return total, codes
 
 
@@ -101,17 +98,13 @@ class RebalancePhase:
     def __init__(
         self,
         *,
-        strategy: Strategy,
-        guard: PlanGuard,
-        resolver: Resolver,
+        compiler: PlanCompiler,
         executor: Executor,
         uow_factory: UoWFactory,
         snapshot_builder: SnapshotBuilder,
         terminal_policy: TerminalPolicy,
     ):
-        self._strategy = strategy
-        self._guard = guard
-        self._resolver = resolver
+        self._compiler = compiler
         self._executor = executor
         self._uow_factory = uow_factory
         self._snapshot_builder = snapshot_builder
@@ -122,15 +115,15 @@ class RebalancePhase:
         snapshot: Snapshot,
         uow: UnitOfWork,
         metrics: ReconcileMetrics,
-    ) -> tuple[list[TreeEvent], bool, list[GuardReport]]:
+    ) -> tuple[list[TreeEvent], bool, tuple[PlanIssue, ...]]:
         """
         Execute rebalance phase.
 
         Returns:
-            (events, plan_renamed_nodes, guard_reports)
+            (events, plan_renamed_nodes, issues)
         """
         events: list[TreeEvent] = []
-        guard_reports: list[GuardReport] = []
+        issues: tuple[PlanIssue, ...] = ()
         plan_renamed_nodes = False
 
         zone = snapshot.zone
@@ -141,32 +134,20 @@ class RebalancePhase:
         # Skip rebalance for terminal categories (unless grouping allowed)
         if is_terminal and not allow_group:
             metrics.allow_rebalance = False
-            return events, plan_renamed_nodes, guard_reports
+            return events, plan_renamed_nodes, issues
 
         # Skip if healthy and no pending
         if zone == Zone.HEALTHY and not snapshot.has_pending:
-            return events, plan_renamed_nodes, guard_reports
+            return events, plan_renamed_nodes, issues
 
         metrics.rebalance_tried = True
 
-        # Get plan from strategy
-        raw_plan = await self._strategy.draft(snapshot)
-        if raw_plan is None:
-            return events, plan_renamed_nodes, guard_reports
-
-        # Validate raw plan
-        raw_plan, raw_report = self._guard.validate_raw_plan(raw_plan)
-        guard_reports.append(raw_report)
-
-        # Resolve to executable plan
-        plan = self._resolver.compile(raw_plan, snapshot)
-
-        # Validate resolved plan
-        plan, resolved_report = self._guard.validate_plan(plan)
-        guard_reports.append(resolved_report)
+        compiled = await self._compiler.compile(snapshot)
+        plan = compiled.plan
+        issues = compiled.issues
 
         if plan.is_empty():
-            return events, plan_renamed_nodes, guard_reports
+            return events, plan_renamed_nodes, issues
 
         # Execute plan
         exec_events = self._executor.execute(plan, snapshot, uow)
@@ -177,7 +158,7 @@ class RebalancePhase:
         plan_renamed_nodes = self._apply_plan_category_updates(
             plan, snapshot, uow)
 
-        return events, plan_renamed_nodes, guard_reports
+        return events, plan_renamed_nodes, issues
 
     def _apply_plan_category_updates(
         self,

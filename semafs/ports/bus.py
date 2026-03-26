@@ -13,14 +13,10 @@ class Bus(Protocol):
         """Publish event to all subscribers."""
         ...
 
-    def subscribe(
-        self,
-        event_type: type[TreeEvent],
-        handler: Callable[[TreeEvent], Awaitable[None]]
-    ) -> None:
+    def subscribe(self, event_type: type[TreeEvent],
+                  handler: Callable[[TreeEvent], Awaitable[None]]) -> None:
         """Subscribe to event type with async handler."""
         ...
 
 
-# Backward-compatible alias while codebase migrates to Bus naming.
 EventBus = Bus

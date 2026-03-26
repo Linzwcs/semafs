@@ -6,12 +6,14 @@ from .core.node import Node, NodePath, NodeType, NodeStage
 from .core.capacity import Budget
 from .core.naming import PathAllocator
 from .core.terminal import TerminalConfig
+from .core.timestamps import utc_now_rfc3339
 from .core.views import NodeView, TreeView, RelatedNodes, StatsView
 from .ports.store import NodeStore
 from .ports.factory import UoWFactory
 from .ports.strategy import Strategy
 from .ports.bus import Bus
 from .ports.placer import Placer
+from .ports.reviewer import PlanReviewer
 from .ports.summarizer import Summarizer
 from .ports.propagation import Policy
 from .engine.keeper import Keeper
@@ -35,6 +37,7 @@ class SemaFS:
             placer: Placer,
             summarizer: Summarizer,
             policy: Policy,
+            plan_reviewer: PlanReviewer | None = None,
             budget: Budget = Budget(),
             terminal_config: TerminalConfig = TerminalConfig(),
     ):
@@ -55,6 +58,7 @@ class SemaFS:
             resolver=self._resolver,
             summarizer=summarizer,
             policy=policy,
+            plan_reviewer=plan_reviewer,
             default_budget=budget,
             terminal_config=terminal_config,
         )
@@ -95,6 +99,7 @@ class SemaFS:
             breadcrumb=breadcrumb,
             child_count=len(children),
             sibling_count=len(siblings),
+            observed_at=utc_now_rfc3339(),
         )
 
     async def list(self, path: str) -> list[NodeView]:

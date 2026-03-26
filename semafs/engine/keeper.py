@@ -13,16 +13,18 @@ from ..ports.store import NodeStore
 from ..ports.factory import UoWFactory
 from ..ports.strategy import Strategy
 from ..ports.bus import Bus
+from ..ports.reviewer import PlanReviewer
 from ..ports.summarizer import Summarizer
 from ..ports.propagation import Policy, Signal
 from .executor import Executor
+from .compiler import DefaultPlanCompiler
+from .validator import PlanValidator
 from .phases import (
     PostRebalancePhases,
     RebalancePhase,
     ReconcileMetrics,
     RollupPhase,
 )
-from .guard import PlanGuard
 from .resolver import Resolver
 from .builder import SnapshotBuilder
 
@@ -53,7 +55,7 @@ class Keeper:
         policy: Policy,
         default_budget: Budget = Budget(),
         terminal_config: TerminalConfig = TerminalConfig(),
-        guard: PlanGuard | None = None,
+        plan_reviewer: PlanReviewer | None = None,
     ):
         self._store = store
         self._uow_factory = uow_factory
@@ -63,16 +65,20 @@ class Keeper:
         self._locks: dict[str, asyncio.Lock] = {}
 
         # Build independent components
-        guard = guard or PlanGuard()
+        validator = PlanValidator()
         terminal_policy = TerminalPolicy(config=terminal_config)
         snapshot_builder = SnapshotBuilder(budget=default_budget)
 
         # Initialize phases with injected dependencies
         self._snapshot_builder = snapshot_builder
-        self._rebalance_phase = RebalancePhase(
-            strategy=strategy,
-            guard=guard,
+        compiler = DefaultPlanCompiler(
+            planner=strategy,
             resolver=resolver,
+            validator=validator,
+            reviewer=plan_reviewer,
+        )
+        self._rebalance_phase = RebalancePhase(
+            compiler=compiler,
             executor=executor,
             uow_factory=uow_factory,
             snapshot_builder=snapshot_builder,
@@ -110,12 +116,22 @@ class Keeper:
         lock = self._locks.setdefault(node_id, asyncio.Lock())
 
         async with lock:
-            result = await self._reconcile_locked(node_id, signal, cause)
+            outcome = await self._reconcile_locked(node_id, signal, cause)
+        if outcome is None:
+            return None
+
+        result, next_id, next_signal = outcome
 
         # Publish events AFTER lock is released to avoid deadlock
         if result and result.pending_events:
             for event in result.pending_events:
                 await self._bus.publish(event)
+
+        # Run upward propagation AFTER lock release and event publish.
+        # Otherwise nested reconcile may publish an event that circles back
+        # to this locked node and deadlock on lock acquisition.
+        if next_id and next_signal:
+            await self.reconcile(next_id, next_signal, cause)
 
         return result
 
@@ -124,7 +140,7 @@ class Keeper:
         node_id: str,
         signal: Signal,
         cause: TreeEvent | None,
-    ) -> ReconcileMetrics | None:
+    ) -> tuple[ReconcileMetrics, str | None, Signal | None] | None:
         """Execute reconcile pipeline under lock."""
         async with self._uow_factory.begin() as uow:
             # Build snapshot using transaction reader
@@ -142,13 +158,13 @@ class Keeper:
             )
 
             # Phase 1: Rebalance
-            events, plan_renamed, guard_reports = await self._rebalance_phase.run(
+            events, plan_renamed, issues = await self._rebalance_phase.run(
                 snapshot, uow, metrics)
 
-            # Update guard metrics
-            rejects, codes = ReconcileMetrics.from_guard_reports(guard_reports)
-            metrics.guard_rejects = rejects
-            metrics.guard_codes = codes
+            # Update validation metrics
+            rejects, codes = ReconcileMetrics.from_issues(issues)
+            metrics.validation_rejects = rejects
+            metrics.validation_codes = codes
 
             # Phase 2: Rollup (terminal categories only)
             await self._rollup_phase.run(snapshot, uow, metrics)
@@ -166,15 +182,15 @@ class Keeper:
         metrics.pending_events = events
         metrics.events = len(events)
 
-        # Phase 4: Propagation (outside transaction but inside lock)
+        # Phase 4: Propagation decision.
+        # Actual reconcile of parent is executed by caller after lock release.
         next_id, next_signal = await self._post_phases.propagation_phase(
             snapshot, signal, cause, summary_changed, plan_renamed)
         if next_id and next_signal:
             metrics.propagated = True
-            await self.reconcile(next_id, next_signal, cause)
 
         self._log_metrics(metrics)
-        return metrics
+        return metrics, next_id, next_signal
 
     def _log_metrics(self, metrics: ReconcileMetrics) -> None:
         """Log reconcile metrics."""
@@ -190,11 +206,11 @@ class Keeper:
             metrics.propagated,
             metrics.events,
         )
-        if metrics.guard_rejects > 0:
+        if metrics.validation_rejects > 0:
             logger.warning(
-                "guard rejects: total=%d codes=%s",
-                metrics.guard_rejects,
-                metrics.guard_codes,
+                "validation rejects: total=%d codes=%s",
+                metrics.validation_rejects,
+                metrics.validation_codes,
             )
 
     async def sweep(self, limit: int | None = None) -> int:

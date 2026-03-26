@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 
 from ...core.capacity import Zone
-from ...core.raw import RawPlan
+from ...core.plan.raw import RawPlan
 from ...core.snapshot import Snapshot
 from ...ports.strategy import Strategy
+from ...ports.planner import PlanDraftRequest
 from .sanitize import parse_keywords, parse_raw_ops
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,19 @@ class HybridStrategy(Strategy):
         self._adapter = adapter
         self._force_threshold = force_threshold
 
-    async def draft(self, snapshot: Snapshot) -> RawPlan | None:
+    async def draft(
+        self,
+        snapshot: Snapshot | PlanDraftRequest,
+    ) -> RawPlan | None:
         """Create plan using hybrid decision logic."""
+        retry_feedback: dict = {}
+        frozen_ops: tuple[dict, ...] = ()
+        if isinstance(snapshot, PlanDraftRequest):
+            request = snapshot
+            snapshot = request.snapshot
+            retry_feedback = dict(request.retry_feedback or {})
+            frozen_ops = tuple(request.frozen_ops or ())
+
         zone = snapshot.zone
 
         # Healthy + no pending -> skip
@@ -34,7 +46,11 @@ class HybridStrategy(Strategy):
 
         # Pressured or overflow -> call LLM
         try:
-            result = await self._adapter.call(snapshot)
+            result = await self._adapter.call(
+                snapshot,
+                retry_feedback=retry_feedback,
+                frozen_ops=frozen_ops,
+            )
             raw_ops = result.get("ops", [])
             parsed = parse_raw_ops(raw_ops, snapshot)
             return RawPlan(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from ...core.raw import RawGroup, RawMerge, RawMove, RawRename
+from ...core.plan.raw import RawGroup, RawMerge, RawMove, RawRename
 from ...core.snapshot import Snapshot
 
 logger = logging.getLogger(__name__)

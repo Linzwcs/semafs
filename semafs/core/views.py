@@ -15,6 +15,7 @@ class NodeView:
     breadcrumb: Tuple[str, ...]
     child_count: int
     sibling_count: int
+    observed_at: str
 
     @property
     def path(self) -> str:
